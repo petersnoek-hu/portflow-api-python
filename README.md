@@ -166,7 +166,22 @@ Bij het starten van `portflow.py`:
 
 Om de scripts te kunnen gebruiken heb je een bearer token nodig van de Portflow API. Het token is een JWT dat je uit de browser haalt nadat je bent ingelogd.
 
-### Stap 1 – Token ophalen uit de browser
+### Automatisch: `retrieve_token.py`
+
+```bash
+pip install playwright
+python retrieve_token.py
+```
+
+Het script opent een Chrome-venster met de Portflow-pagina in Canvas. Log zo nodig in. Zodra de pagina een API-request met een `Authorization: Bearer ...` header doet, wordt de token gecontroleerd tegen `/api/v1/dashboard` en opgeslagen als `PORTFLOW_BEARER_TOKEN` in `.env`. Het venster sluit daarna automatisch.
+
+- Het browserprofiel wordt bewaard in `.browser-profile/` (staat in `.gitignore`), zodat je de volgende keer meestal niet opnieuw hoeft in te loggen.
+- Opties: `--config pad/naar/.env` en `--timeout <seconden>` (standaard 300).
+- Bij het starten toont het script de gebruikte Python (pad + versie, minimaal 3.10), de versies van `requests` en `playwright` en de gevonden browser met versie. Ontbreekt `requests`/`playwright`, of is er geen Google Chrome én geen Playwright Chromium, dan biedt het script aan dit te installeren.
+
+### Handmatig
+
+#### Stap 1 – Token ophalen uit de browser
 
 1. Log in op [Portflow via Canvas](https://canvas.hu.nl/courses/51659/external_tools/1134) met je HU-account.
 2. Open de **Inspector** in je browser (rechtermuisknop → Inspecteren, of `F12` / `Cmd+Option+I`).
@@ -181,7 +196,7 @@ De screenshot hieronder toont hoe je het token ophaalt in Safari (het token in d
 
 ![Screenshot](docs/images/portflow-dashboard-redacted.png)
 
-### Stap 2 – Token opslaan in `.env`
+#### Stap 2 – Token opslaan in `.env`
 
 Plak het gekopieerde token in je `.env` bestand:
 
