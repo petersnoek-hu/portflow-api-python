@@ -166,6 +166,15 @@ Bij het starten van `portflow.py`:
 
 Om de scripts te kunnen gebruiken heb je een bearer token nodig van de Portflow API. Het token is een JWT dat je uit de browser haalt nadat je bent ingelogd.
 
+### Vanuit `portflow.py`
+
+Is het token in `.env` leeg of verlopen, dan vraagt `portflow.py` hoe je een nieuw token wilt ophalen:
+
+1. **Via een browservenster**: dezelfde werking als `retrieve_token.py` hieronder (vereist `playwright`; het script biedt aan het te installeren).
+2. **Token plakken**: haal het token handmatig op (zie [Handmatig](#handmatig)) en plak het. Je kunt het token ook direct bij de keuzevraag plakken.
+
+Het nieuwe token wordt altijd automatisch opgeslagen als `PORTFLOW_BEARER_TOKEN` in `.env`.
+
 ### Automatisch: `retrieve_token.py`
 
 ```bash
@@ -206,7 +215,7 @@ PORTFLOW_BEARER_TOKEN=eyJraWQiOi...
 
 Het token verloopt na ongeveer 2 uur. Haal dan een nieuw token op via bovenstaande stappen.
 
-Als `PORTFLOW_BEARER_TOKEN` leeg is of ontbreekt, vragen de scripts bij elke run om een token via de terminal. Je kunt het token ook meegeven als CLI-argument bij `portflow_export_full.py` via `--token <token>`.
+Als `PORTFLOW_BEARER_TOKEN` leeg is of ontbreekt, vragen de scripts bij elke run om een token via de terminal (`portflow.py` slaat dat token daarna zelf op in `.env`). Je kunt het token ook meegeven als CLI-argument bij `portflow_export_full.py` via `--token <token>`.
 
 ## Output Behavior
 

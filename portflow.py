@@ -2,12 +2,19 @@ import requests
 import csv
 import time
 import argparse
+import importlib.util
 import json
 import os
+import platform
 import re
+import shutil
+import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 def _get_exe_dir() -> Path:
@@ -163,7 +170,19 @@ if _missing:
 load_env_file(ENV_FILE)
 
 BASE_URL = "https://portfolio.drieam.app/api/v1"
-PER_PAGE = 200
+# De API levert maximaal 50 items per pagina, ook als je om meer vraagt.
+# Pagineerlussen stoppen bij een pagina korter dan PER_PAGE, dus deze waarde
+# mag niet hoger zijn dan dat maximum (anders wordt pagina 2+ overgeslagen).
+PER_PAGE = 50
+# Aantal gelijktijdige API-verzoeken bij het ophalen van feedback-items per doel.
+MAX_WORKERS = 8
+
+# Eén gedeelde sessie: hergebruikt de TCP/TLS-verbinding (keep-alive) i.p.v.
+# per verzoek een nieuwe verbinding op te zetten. De pool is groot genoeg voor
+# MAX_WORKERS gelijktijdige verzoeken.
+HTTP = requests.Session()
+HTTP.mount("https://", requests.adapters.HTTPAdapter(pool_maxsize=MAX_WORKERS))
+
 BEARER_TOKEN = os.getenv("PORTFLOW_BEARER_TOKEN", "").strip()
 
 SECTION_ID = "72086"
@@ -593,6 +612,8 @@ API_DEBUG_FILE = "api_debug_log.jsonl"
 PENDING_DEBUG_FILE = "pending_debug.json"
 
 PENDING_DEBUG_EVENTS = []
+# API-verzoeken lopen deels parallel; debug-/schema-registratie gebeurt onder dit slot.
+_DEBUG_LOCK = threading.Lock()
 
 
 def init_debug_files():
@@ -620,7 +641,7 @@ def log_api_debug(url, params, status_code=None, body=None, error=None):
         "response_body": body,
     }
 
-    with open(API_DEBUG_FILE, "a", encoding="utf-8") as f:
+    with _DEBUG_LOCK, open(API_DEBUG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
@@ -709,7 +730,8 @@ init_debug_files()
 
 def observe_schema(value, path):
     if SCHEMA is not None:
-        SCHEMA.observe(value, path)
+        with _DEBUG_LOCK:
+            SCHEMA.observe(value, path)
 
 
 def maybe_write_schema_report():
@@ -728,7 +750,7 @@ def _save_token_to_env(token: str) -> None:
         if re.search(r"^PORTFLOW_BEARER_TOKEN=", content, flags=re.MULTILINE):
             content = re.sub(
                 r"^PORTFLOW_BEARER_TOKEN=.*$",
-                f"PORTFLOW_BEARER_TOKEN={token}",
+                lambda _m: f"PORTFLOW_BEARER_TOKEN={token}",
                 content,
                 flags=re.MULTILINE,
             )
@@ -787,7 +809,7 @@ def _get_own_user_name(token: str) -> str | None:
         return _jwt_user_name(token)
     try:
         headers = {"accept": "*/*", "authorization": f"Bearer {token}", "user-agent": "Mozilla/5.0"}
-        response = requests.get(
+        response = HTTP.get(
             f"{BASE_URL}/portfolios/{OWN_PORTFOLIO_ID}",
             headers=headers,
             timeout=5,
@@ -815,18 +837,209 @@ def get_bearer_token(force_prompt: bool = False):
     elif token_from_var and force_prompt:
         print("Authentication bearer token uit .env is verouderd.")
 
-    print()
-    print("Haal een nieuw token op via browser inspector → Network → filter op 'dashboard'")
-    print()
-    token = input("Plak bearer token: ").strip()
-    if not token:
-        raise SystemExit("Geen token opgegeven, script gestopt.")
-
-    save = input("Token opslaan in .env? [J/n] ").strip().lower()
-    if save in ("", "j", "y", "yes", "ja"):
-        _save_token_to_env(token)
-        globals()["BEARER_TOKEN"] = token
+    token = _ask_new_token()
+    _save_token_to_env(token)
+    globals()["BEARER_TOKEN"] = token
     return token
+
+
+def _ask_new_token() -> str:
+    """Vraag om een nieuw token: ophalen via een browservenster of zelf plakken.
+    Een token dat direct bij de keuzevraag wordt geplakt, wordt ook geaccepteerd."""
+    print()
+    print("Nieuw token ophalen:")
+    print("  1) Via een browservenster (log zo nodig in bij Canvas; het token wordt automatisch opgehaald)")
+    print("  2) Token plakken (browser inspector → Network → filter op 'dashboard')")
+    while True:
+        choice = input("Keuze [1/2] (of plak direct het token): ").strip()
+        if not choice:
+            raise SystemExit("Geen token opgegeven, script gestopt.")
+        if choice == "1":
+            token = _capture_token_via_browser(BROWSER_TOKEN_TIMEOUT_S)
+            if token:
+                return token
+            print("Geen token via de browser verkregen; kies opnieuw.")
+        elif choice == "2":
+            token = input("Plak bearer token: ").strip()
+            if not token:
+                raise SystemExit("Geen token opgegeven, script gestopt.")
+            return token
+        elif len(choice) > 20:
+            return choice
+        else:
+            print("Ongeldige keuze.")
+
+
+# ------------------------
+# Token ophalen via browser (Playwright)
+# ------------------------
+# Werking (zelfde aanpak als docs/safari-browser-extension.js):
+#   1. Open een Chrome-venster met een eigen, blijvend profiel (zodat de login bewaard blijft).
+#   2. Ga naar de Portflow-tool in Canvas. Log zo nodig in.
+#   3. Luister naar alle uitgaande requests (ook vanuit het Portflow-iframe) en onderschep
+#      de 'Authorization: Bearer ...' header naar portflow.io / hu.nl / drieam.app.
+#   4. Controleer de token tegen /api/v1/dashboard.
+
+CANVAS_URL = "https://canvas.hu.nl/courses/51659/external_tools/1134"
+TOKEN_HOST_SUFFIXES = ("portflow.io", "hu.nl", "drieam.app")
+BROWSER_TOKEN_TIMEOUT_S = 300
+# Browserprofiel naast het script, zodat de Canvas/HU-login tussen runs bewaard blijft
+BROWSER_PROFILE_DIR = _get_exe_dir() / ".browser-profile"
+
+
+def _ask_yes(question: str) -> bool:
+    answer = input(f"{question} [J/n] ").strip().lower()
+    return answer in ("", "j", "ja", "y", "yes")
+
+
+def _ensure_playwright() -> bool:
+    """Controleer of Playwright aanwezig is; bied installatie aan als het ontbreekt."""
+    if importlib.util.find_spec("playwright") is not None:
+        return True
+    print("Python-pakket 'playwright' is niet geïnstalleerd (nodig om het token via de browser op te halen).")
+    if getattr(sys, 'frozen', False) or not _ask_yes(f"'playwright' nu installeren met {sys.executable}?"):
+        print(f"Installeer het met: {sys.executable} -m pip install playwright")
+        return False
+    result = subprocess.run([sys.executable, "-m", "pip", "install", "playwright"])
+    importlib.invalidate_caches()
+    return result.returncode == 0 and importlib.util.find_spec("playwright") is not None
+
+
+def _find_chrome() -> Path | None:
+    """Zoek een geïnstalleerde Google Chrome (het 'chrome'-kanaal van Playwright)."""
+    system = platform.system()
+    if system == "Darwin":
+        candidates = [
+            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ]
+    elif system == "Windows":
+        candidates = [
+            Path(os.environ.get(var, "")) / "Google/Chrome/Application/chrome.exe"
+            for var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")
+            if os.environ.get(var)
+        ]
+    else:
+        candidates = [Path(p) for p in (shutil.which("google-chrome"), shutil.which("google-chrome-stable")) if p]
+    return next((c for c in candidates if c.exists()), None)
+
+
+def _token_host_matches(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return any(host == s or host.endswith("." + s) for s in TOKEN_HOST_SUFFIXES)
+
+
+def _check_token(token: str) -> int:
+    """Live controle van de token tegen een bekend Portflow API-endpoint; geeft de HTTP-status terug."""
+    try:
+        r = HTTP.get(
+            f"{BASE_URL}/dashboard",
+            headers={"Authorization": f"Bearer {token}", "accept": "*/*"},
+            timeout=15,
+        )
+        return r.status_code
+    except requests.RequestException:
+        return 0
+
+
+def _launch_browser_context(p):
+    """Start Chrome met een blijvend profiel; val terug op Playwright's Chromium.
+    Geeft None terug als er geen browser gestart kan worden."""
+    from playwright.sync_api import Error as PlaywrightError
+
+    # chromium_sandbox=True voorkomt dat Playwright Chrome met --no-sandbox start
+    kwargs = dict(user_data_dir=str(BROWSER_PROFILE_DIR), headless=False, no_viewport=True, chromium_sandbox=True)
+
+    chrome = _find_chrome()
+    if chrome:
+        print(f"Browser: Google Chrome ({chrome})")
+        kwargs["channel"] = "chrome"
+    else:
+        chromium = Path(p.chromium.executable_path)
+        print("Google Chrome niet gevonden.")
+        if not chromium.exists():
+            if getattr(sys, 'frozen', False) or not _ask_yes("Playwright Chromium nu installeren?"):
+                print(f"Installeer Google Chrome, of voer uit: {sys.executable} -m playwright install chromium")
+                return None
+            if subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"]).returncode != 0:
+                return None
+        print(f"Browser: Playwright Chromium ({chromium})")
+
+    try:
+        return p.chromium.launch_persistent_context(**kwargs)
+    except PlaywrightError:
+        print(
+            "Browser kon niet starten. Staat er nog een browservenster van een eerdere run open?\n"
+            f"Sluit dat venster (profiel: {BROWSER_PROFILE_DIR}) en probeer opnieuw."
+        )
+        return None
+
+
+def _capture_token_via_browser(timeout_s: int) -> str | None:
+    """Open een browservenster op de Portflow-tool in Canvas en onderschep de bearer token.
+    Geeft de gecontroleerde token terug, of None als dat niet lukt."""
+    if not _ensure_playwright():
+        return None
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def on_request(request):
+        if not _token_host_matches(request.url):
+            return
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:].strip()
+            if token and token not in seen:
+                seen.add(token)
+                candidates.append(token)
+                print("Bearer token onderschept, bezig met controleren...")
+
+    with sync_playwright() as p:
+        context = _launch_browser_context(p)
+        if context is None:
+            return None
+        # Luister op context-niveau: vangt ook requests uit iframes en nieuwe tabbladen
+        context.on("request", on_request)
+
+        page = context.pages[0] if context.pages else context.new_page()
+        print(f"Openen: {CANVAS_URL}")
+        print("Log zo nodig in; het venster sluit automatisch zodra de token is gevonden.")
+        try:
+            page.goto(CANVAS_URL, wait_until="domcontentloaded")
+        except PlaywrightError as e:
+            print(f"Waarschuwing bij laden van de pagina: {e}")
+
+        token = None
+        deadline = time.monotonic() + timeout_s
+        try:
+            while time.monotonic() < deadline:
+                while candidates:
+                    candidate = candidates.pop(0)
+                    status = _check_token(candidate)
+                    if status == 200:
+                        token = candidate
+                        break
+                    print(f"Onderschepte token is niet geldig voor de Portflow API (HTTP {status}), wacht op volgende...")
+                if token:
+                    break
+                if not context.pages:
+                    print("Browservenster gesloten voordat er een token gevonden is.")
+                    break
+                # Laat Playwright events verwerken (time.sleep zou de event loop blokkeren)
+                context.pages[0].wait_for_timeout(500)
+            else:
+                print(f"Geen geldige token gevonden binnen {timeout_s} seconden.")
+        except PlaywrightError:
+            print("Browservenster gesloten voordat er een token gevonden is.")
+        finally:
+            try:
+                context.close()
+            except PlaywrightError:
+                pass
+        return token
 
 
 def get_section_id(force_prompt: bool = False) -> str:
@@ -1496,12 +1709,14 @@ def _fetch_selfeval_skills_by_request(token, portfolio_ids, wanted_rids=None):
         goals = get_goals(token, pid)
         if not isinstance(goals, list):
             continue
-        for goal in goals:
-            gid = goal.get("id")
-            ab = abbrev_by_goal.get(goal.get("name"))
-            if not ab or gid is None:
-                continue
-            items = get_feedback(token, pid, gid)
+        wanted_goals = [
+            (goal["id"], abbrev_by_goal[goal.get("name")])
+            for goal in goals
+            if goal.get("id") is not None and goal.get("name") in abbrev_by_goal
+        ]
+        feedback_by_goal = get_feedback_for_goals(token, pid, (gid for gid, _ in wanted_goals))
+        for gid, ab in wanted_goals:
+            items = feedback_by_goal[gid]
             if not isinstance(items, list):
                 continue
             for it in items:
@@ -2352,7 +2567,7 @@ def request_with_retries(url, headers, params=None, max_attempts=3):
     attempt = 0
     while attempt < max_attempts:
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=15)
+            response = HTTP.get(url, headers=headers, params=params, timeout=15)
             response_body = response.text
 
             if response.status_code == 401:
@@ -2494,57 +2709,6 @@ def extract_students(shared_items):
 # Portfolio & feedback fetching
 # ------------------------
 
-def get_sent_invitations(token, portfolio_id) -> dict:
-    """
-    Haalt review requests op die vanuit dit portfolio zijn verzonden.
-    Geeft een dict terug: review_request_id → {"name": reviewer_naam|None, "status": status|None}.
-
-    Gebruikt: GET /portfolios/{id}/progress-review/invitations/sent
-    """
-    headers = {"accept": "*/*", "authorization": f"Bearer {token}", "user-agent": "Mozilla/5.0"}
-    mapping: dict = {}
-    page = 1
-    while True:
-        response = request_with_retries(
-            f"{BASE_URL}/portfolios/{portfolio_id}/progress-review/invitations/sent",
-            headers,
-            params={
-                "order_by": "created_at",
-                "order_direction": "desc",
-                "page": page,
-                "per_page": PER_PAGE,
-            },
-        )
-        if response in (None, "TOKEN_EXPIRED"):
-            break
-        if isinstance(response, requests.Response) and response.status_code == 404:
-            break
-        try:
-            data = response.json()
-        except Exception:
-            break
-        if not isinstance(data, list) or not data:
-            break
-
-        for item in data:
-            rid = item.get("review_request_id")
-            if not rid:
-                continue
-            reviewer_obj = item.get("reviewer") or {}
-            name = (
-                reviewer_obj.get("name")
-                or reviewer_obj.get("full_name")
-                or item.get("reviewer_name")
-            )
-            mapping[rid] = {"name": name, "status": item.get("status")}
-
-        if len(data) < PER_PAGE:
-            break
-        page += 1
-
-    return mapping
-
-
 _received_assessor_cache: dict = {}
 
 
@@ -2554,8 +2718,8 @@ def get_received_assessor_map(token) -> dict:
 
     Bron: de received-invitations van de ingelogde gebruiker. Bij deze verzoeken is
     de beoordelaar altijd de ingelogde gebruiker zelf (de student is de requester).
-    Dient als fallback voor de assessornaam wanneer het sent-invitations-endpoint
-    van een studentportfolio niet beschikbaar is (geeft daar vaak 404)."""
+    Het sent-invitations-endpoint van een studentportfolio is voor docenten niet
+    toegankelijk (geeft altijd 404), dus dit is de enige bron voor de assessornaam."""
     cached = _received_assessor_cache.get("map")
     if cached is not None:
         return cached
@@ -2571,18 +2735,35 @@ def get_received_assessor_map(token) -> dict:
 
 def get_goals(token, portfolio_id):
     headers = {"accept": "*/*", "authorization": f"Bearer {token}"}
-    response = request_with_retries(
-        f"{BASE_URL}/portfolios/{portfolio_id}/goals",
-        headers,
-        params={"page": 1, "per_page": PER_PAGE}
-    )
-    if response in (None, "TOKEN_EXPIRED"):
-        return response
-    if isinstance(response, requests.Response) and response.status_code == 404:
-        return "NOT_FOUND"
-    data = response.json()
-    observe_schema(data, "portfolios.goals.response")
-    return data
+    goals = []
+    page = 1
+
+    while True:
+        response = request_with_retries(
+            f"{BASE_URL}/portfolios/{portfolio_id}/goals",
+            headers,
+            params={"page": page, "per_page": PER_PAGE}
+        )
+        if response == "TOKEN_EXPIRED":
+            return response
+        if response is None:
+            # Eerste pagina mislukt → fout doorgeven; latere pagina → wat we hebben.
+            return goals if page > 1 else None
+        if isinstance(response, requests.Response) and response.status_code == 404:
+            return "NOT_FOUND"
+        data = response.json()
+        observe_schema(data, "portfolios.goals.response")
+        if not data:
+            break
+
+        goals.extend(data)
+
+        if len(data) < PER_PAGE:
+            break
+
+        page += 1
+
+    return goals
 
 def get_feedback(token, portfolio_id, goal_id):
     headers = {"accept": "*/*", "authorization": f"Bearer {token}"}
@@ -2618,6 +2799,15 @@ def get_feedback(token, portfolio_id, goal_id):
         page += 1
 
     return feedback_items
+
+def get_feedback_for_goals(token, portfolio_id, goal_ids) -> dict:
+    """goal_id → resultaat van get_feedback, met MAX_WORKERS verzoeken tegelijk.
+
+    De volgorde van verwerken blijft aan de aanroeper; alleen het ophalen loopt parallel."""
+    goal_ids = list(goal_ids)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        results = pool.map(lambda gid: get_feedback(token, portfolio_id, gid), goal_ids)
+        return dict(zip(goal_ids, results))
 
 def resolve_level(evaluation):
     level_id = evaluation.get("level")
@@ -2907,19 +3097,17 @@ def collect_results(
         any_accessible = True
 
         # Haal reviewer-namen op voor openstaande review requests (self-evaluaties).
-        # Alleen nodig als we pending items tonen. Het sent-invitations-endpoint geeft
-        # voor studentportfolio's vaak 404; in dat geval vullen we de gevraagde
-        # beoordelaar aan vanuit de received-invitations van de ingelogde gebruiker.
-        rid_to_reviewer: dict = get_sent_invitations(token, portfolio_id) if include_ungraded else {}
-        if include_ungraded:
-            for _rid, _info in get_received_assessor_map(token).items():
-                rid_to_reviewer.setdefault(_rid, _info)
+        # Alleen nodig als we pending items tonen. De received-invitations van de
+        # ingelogde gebruiker zijn hiervoor de enige bron (zie get_received_assessor_map).
+        rid_to_reviewer: dict = get_received_assessor_map(token) if include_ungraded else {}
+
+        feedback_by_goal = get_feedback_for_goals(token, portfolio_id, (g["id"] for g in goals))
 
         for goal in goals:
             goal_id = goal["id"]
             goal_name = goal["name"]
 
-            feedback_items = get_feedback(token, portfolio_id, goal_id)
+            feedback_items = feedback_by_goal[goal_id]
             if feedback_items == "TOKEN_EXPIRED":
                 return "TOKEN_EXPIRED"
             if feedback_items == "NOT_FOUND":
@@ -3104,7 +3292,7 @@ def collect_results(
                 _pending_role = item.get("role")
                 if _pending_role == "self" and is_pending:
                     # evaluation.reviewer is the student themselves on self-eval items.
-                    # Look up the actual assigned assessor via the sent-invitations map.
+                    # Look up the actual assigned assessor via the received-invitations map.
                     _rid = (evaluation or {}).get("review_request_id")
                     _ev_reviewer = (rid_to_reviewer.get(_rid) or {}).get("name") if _rid else None
                 else:
