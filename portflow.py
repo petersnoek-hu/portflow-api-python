@@ -842,7 +842,7 @@ def get_section_id(force_prompt: bool = False) -> str:
 def anonymize_name(full_name: str) -> str:
     if not isinstance(full_name, str) or not full_name.strip():
         return full_name
-    return " ".join(p[0] + "*" * (len(p) - 1) for p in full_name.split())
+    return " ".join("*" * len(p) for p in full_name.split())
 
 
 def name_to_initials(full_name: str) -> str:
@@ -927,9 +927,37 @@ def choose_semester_scope() -> str:
 # Excel import helpers
 # ------------------------
 
-def _find_excel_with_student_columns() -> "list[tuple[Path, str]]":
-    """Geeft alle .xlsx-bestanden in de scriptmap die de vereiste kolomkoppen bevatten."""
-    required = {"Nummer", "Naam", "Email", "Semester", "Project", "Coach", "Gilde voorkeur"}
+def _norm_header(h) -> str:
+    """Normaliseert een kolomkop zodat '-' en spaties/underscores gelijk tellen
+    (bijv. 'Gilde-voorkeur' == 'Gilde voorkeur') en hoofdlettergevoeligheid vervalt."""
+    return re.sub(r"[-_\s]+", " ", str(h or "").strip()).lower()
+
+
+def _canon_header_key(h) -> str:
+    """Zet '-'/'_' in een kolomkop om naar een spatie (zonder lowercasen), zodat
+    varianten zoals 'Gilde-voorkeur' matchen met de letterlijke sleutel
+    'Gilde voorkeur' die elders in de code gebruikt wordt."""
+    return re.sub(r"[-_]+", " ", str(h or "").strip())
+
+
+def _find_header_row(ws, required_headers: "set[str]", max_scan_rows: int = 20):
+    """Zoekt de eerste rij (tot max_scan_rows diep) die alle vereiste kolomkoppen
+    bevat. Headers hoeven dus niet per se op rij 1 te staan (zie bijv.
+    'coach studenten ...xlsx' waar de headers op rij 3 staan).
+    Geeft (rijnummer, ruwe headers-lijst) terug, of (None, None) als er geen match is."""
+    required = {_norm_header(h) for h in required_headers}
+    for row in ws.iter_rows(min_row=1, max_row=max_scan_rows):
+        raw = [c.value for c in row]
+        headers = {_norm_header(v) for v in raw if v}
+        if required.issubset(headers):
+            return row[0].row, raw
+    return None, None
+
+
+def _find_excel_with_columns(required_headers: "set[str]") -> "list[tuple[Path, str]]":
+    """Geeft alle .xlsx-bestanden in de scriptmap die de opgegeven kolomkoppen
+    bevatten (kolomkoppen worden genormaliseerd vergeleken, zie _norm_header).
+    De headerrij hoeft niet per se rij 1 te zijn, zie _find_header_row."""
     script_dir = Path(__file__).resolve().parent
     matches = []
     for path in sorted(script_dir.glob("*.xlsx")):
@@ -937,13 +965,65 @@ def _find_excel_with_student_columns() -> "list[tuple[Path, str]]":
             import openpyxl as _xl
             wb = _xl.load_workbook(path, data_only=True, read_only=True)
             ws = wb.active
-            headers = {c.value for c in next(ws.iter_rows(min_row=1, max_row=1)) if c.value}
+            header_row, _ = _find_header_row(ws, required_headers)
             wb.close()
-            if required.issubset(headers):
+            if header_row is not None:
                 matches.append((path, path.name))
         except Exception:
             continue
     return matches
+
+
+def _find_excel_with_student_columns() -> "list[tuple[Path, str]]":
+    """Geeft alle .xlsx-bestanden in de scriptmap die de vereiste kolomkoppen bevatten
+    voor het importeren van coach-/tribe-/gilde-studenten (Nummer, Naam, Email, ...)."""
+    return _find_excel_with_columns({"Nummer", "Naam", "Email", "Semester", "Project", "Coach", "Gilde voorkeur"})
+
+
+def _find_excel_with_gildemeester_columns() -> "list[tuple[Path, str]]":
+    """Geeft alle .xlsx-bestanden in de scriptmap die de vereiste kolomkoppen bevatten
+    voor het importeren van studenten op basis van gildemeesterschap
+    (bijv. aanwezigheidsbestanden zoals 'Aanwezigheid FE-UXUI ...')."""
+    return _find_excel_with_columns({"Student", "Coach", "Semester", "Gildemeester"})
+
+
+def _find_excel_with_missing_coach_columns() -> "list[tuple[Path, str]]":
+    """Geeft alle .xlsx-bestanden in de scriptmap die de vereiste kolomkoppen bevatten
+    voor het aanvullen van PORTFLOW_COACH_STUDENTS_JSON met studenten uit een
+    bestand zonder 'Coach'-kolom (bijv. 'coach studenten ...xlsx', dat alleen de
+    studenten van één coach bevat)."""
+    return _find_excel_with_columns({"Nummer", "Naam", "Project", "Gilde", "Sem"})
+
+
+def _choose_xlsx_candidate(candidates: "list[tuple[Path, str]]", label: str) -> "tuple[Path, str] | None":
+    """Laat de gebruiker kiezen uit meerdere gevonden Excel-bestanden (of geeft
+    automatisch het enige resultaat terug). 'label' omschrijft waarvoor de
+    bestanden gezocht zijn, voor gebruik in de menutekst."""
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    _HL = "\033[48;2;100;160;220m\033[1m"
+    _RS = "\033[0m"
+    print(f"\nMeerdere Excel-bestanden gevonden met de juiste kolomkoppen voor {label}:")
+    for _i, (_, _fn_c) in enumerate(candidates, 1):
+        print(f"  {_i}) [{_fn_c}]")
+    print()
+    _raw_xls = input(f"Welk bestand wil je gebruiken? (1-{len(candidates)}): ").strip()
+    if _raw_xls.isdigit() and 1 <= int(_raw_xls) <= len(candidates):
+        _xlsx_idx = int(_raw_xls) - 1
+        print(f"\033[{len(candidates) + 3}A\033[J", end="")
+        print(f"\nMeerdere Excel-bestanden gevonden met de juiste kolomkoppen voor {label}:")
+        for _i, (_, _fn_c) in enumerate(candidates, 1):
+            if _i - 1 == _xlsx_idx:
+                print(f"  {_HL}{_i}) [{_fn_c}]{_RS}")
+            else:
+                print(f"  {_i}) [{_fn_c}]")
+        print()
+        print(f"Welk bestand wil je gebruiken? (1-{len(candidates)}): {_raw_xls}")
+        return candidates[_xlsx_idx]
+    return candidates[0]
 
 
 def _extract_semester_number(sem_str: str) -> str:
@@ -1642,7 +1722,7 @@ def _enrich_env_from_excel(xlsx_path: Path) -> bool:
     wb = _xl.load_workbook(xlsx_path, data_only=True)
     ws = wb.active
     raw_headers = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
-    col = {h: i for i, h in enumerate(raw_headers) if h}
+    col = {_canon_header_key(h): i for i, h in enumerate(raw_headers) if h}
 
     # Bouw lookup: naam (lowercase) → velden uit Excel
     excel_by_name: dict = {}
@@ -1732,7 +1812,7 @@ def _import_gilde_from_excel(xlsx_path: Path) -> bool:
     wb = _xl.load_workbook(xlsx_path, data_only=True)
     ws = wb.active
     raw_headers = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
-    col = {h: i for i, h in enumerate(raw_headers) if h}
+    col = {_canon_header_key(h): i for i, h in enumerate(raw_headers) if h}
 
     rows = [
         row for row in ws.iter_rows(min_row=2, values_only=True)
@@ -1863,6 +1943,262 @@ def _import_gilde_from_excel(xlsx_path: Path) -> bool:
     return True
 
 
+def _row_gildemeester_gilde(row: tuple, col: dict) -> str:
+    """Leidt de gilde-waarde af uit de 'Frontend'/'UX-UI'-kolommen (indien aanwezig)
+    van een aanwezigheidsbestand. Beide kunnen tegelijk ingevuld zijn."""
+    parts = []
+    if "Frontend" in col and str(row[col["Frontend"]] or "").strip():
+        parts.append("Front-end developer (FE)")
+    if "UX UI" in col and str(row[col["UX UI"]] or "").strip():
+        parts.append("UX-UI developer (UX)")
+    return " / ".join(parts)
+
+
+def _import_gildemeester_students_from_excel(xlsx_path: Path) -> bool:
+    """
+    Interactief: kies een gildemeester uit het Excel-bestand (bijv. een
+    aanwezigheidsbestand met kolommen Student, Coach, Semester, Gildemeester)
+    en voeg de bijbehorende studenten toe aan PORTFLOW_GILDE_STUDENTS_JSON,
+    met het 'gildemeester'-veld ingevuld.
+    """
+    try:
+        import openpyxl as _xl
+    except ImportError:
+        print("Fout: openpyxl is niet geïnstalleerd. Voer 'pip install openpyxl' uit.")
+        return False
+
+    wb = _xl.load_workbook(xlsx_path, data_only=True)
+    ws = wb.active
+    raw_headers = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    col = {_canon_header_key(h): i for i, h in enumerate(raw_headers) if h}
+
+    required_cols = {"Student", "Coach", "Semester", "Gildemeester"}
+    missing = required_cols - col.keys()
+    if missing:
+        print(f"Fout: kolommen ontbreken in het Excel-bestand: {', '.join(sorted(missing))}")
+        return False
+
+    rows = [
+        row for row in ws.iter_rows(min_row=2, values_only=True)
+        if str(row[col["Student"]] or "").strip()
+    ]
+
+    # Unieke gildemeesters, gesorteerd
+    gildemeesters = sorted({str(r[col["Gildemeester"]] or "").strip() for r in rows} - {""})
+    if not gildemeesters:
+        print("Geen gildemeesters gevonden in het Excel-bestand.")
+        return False
+
+    print("\nBeschikbare gildemeesters:")
+    for i, gm in enumerate(gildemeesters, 1):
+        n = sum(1 for r in rows if str(r[col["Gildemeester"]] or "").strip() == gm)
+        print(f"  {i}) {gm}  ({n} studenten)")
+    print()
+
+    raw = input("Kies een gildemeester (volgnummer of naam): ").strip()
+    if raw.isdigit() and 1 <= int(raw) <= len(gildemeesters):
+        chosen = gildemeesters[int(raw) - 1]
+        chosen_idx = raw
+    else:
+        matches = [g for g in gildemeesters if raw.lower() == g.lower()]
+        if not matches:
+            matches = [g for g in gildemeesters if raw.lower() in g.lower()]
+        if len(matches) == 1:
+            chosen = matches[0]
+            chosen_idx = str(gildemeesters.index(chosen) + 1)
+        elif len(matches) > 1:
+            print(f"Meerdere gildemeesters gevonden: {', '.join(matches)}. Wees specifieker.")
+            return False
+        else:
+            print("Gildemeester niet gevonden.")
+            return False
+
+    _HL = "\033[48;2;100;160;220m\033[1m"
+    _RS = "\033[0m"
+    print(f"\033[{len(gildemeesters) + 3}A\033[J", end="")
+    print("\nBeschikbare gildemeesters:")
+    for i, gm in enumerate(gildemeesters, 1):
+        label = f"{i}) {gm}  ({sum(1 for r in rows if str(r[col['Gildemeester']] or '').strip() == gm)} studenten)"
+        if str(i) == chosen_idx:
+            print(f"  {_HL}{label}{_RS}")
+        else:
+            print(f"  {label}")
+    print()
+    print(f"Kies een gildemeester (volgnummer of naam): {raw}")
+
+    gm_rows = [r for r in rows if str(r[col["Gildemeester"]] or "").strip() == chosen]
+    print(f"\n{len(gm_rows)} studenten gevonden voor gildemeester '{chosen}'.")
+
+    new_entries = _group_by_tribe([
+        {
+            "name":         str(r[col["Student"]] or "").strip(),
+            "start_date":   None,
+            "semester":     _extract_semester_number(str(r[col["Semester"]] or "")),
+            "tribe":        str(r[col["Project team"]] or "").strip() if "Project team" in col else "",
+            "gilde":        _row_gildemeester_gilde(r, col),
+            "coach":        str(r[col["Coach"]] or "").strip(),
+            "gildemeester": chosen,
+        }
+        for r in gm_rows
+        if str(r[col["Student"]] or "").strip()
+    ])
+
+    existing_raw = os.getenv("PORTFLOW_GILDE_STUDENTS_JSON", "").strip()
+    try:
+        existing_list: list = json.loads(re.sub(r",\s*([\]\}])", r"\1", existing_raw)) if existing_raw else []
+        if not isinstance(existing_list, list):
+            existing_list = []
+    except Exception:
+        existing_list = []
+
+    existing_names = {
+        (e.get("name") or "").lower()
+        for e in existing_list
+        if isinstance(e, dict) and not e.get("separator")
+    }
+    to_add = [e for e in new_entries if not e.get("separator") and (e.get("name") or "").lower() not in existing_names]
+    already = len(new_entries) - len([e for e in new_entries if e.get("separator")]) - len(to_add)
+
+    if already:
+        print(f"  {already} student(en) stonden al in PORTFLOW_GILDE_STUDENTS_JSON, worden overgeslagen.")
+    if not to_add:
+        print("  Geen nieuwe studenten toe te voegen.")
+        return False
+
+    # Voeg toe en sorteer volledige lijst op tribe + naam
+    all_entries = [e for e in existing_list if not e.get("separator")] + to_add
+    combined = _group_by_tribe(all_entries)
+
+    parts = ["["]
+    for i, e in enumerate(combined):
+        comma = "," if i < len(combined) - 1 else ""
+        parts.append(f"    {json.dumps(e, ensure_ascii=False)}{comma}")
+    parts.append("    ]")
+    json_str = "\n".join(parts)
+
+    _write_env_key("PORTFLOW_GILDE_STUDENTS_JSON", json_str)
+    os.environ["PORTFLOW_GILDE_STUDENTS_JSON"] = json_str
+    _reload_gilde_students()
+    print(f"  {len(to_add)} student(en) toegevoegd aan PORTFLOW_GILDE_STUDENTS_JSON.")
+    return True
+
+
+# Korte gildecodes (zoals gebruikt in 'coach studenten ...xlsx') -> volledige gildenaam
+# (zoals gebruikt in de 'Gilde-voorkeur'-kolom van het studenten-importbestand).
+_GILDE_CODE_TO_NAME = {
+    "AI":  "AI engineer (AI)",
+    "BE":  "Back-end developer (BE)",
+    "BIT": "Business IT Engineer (BIT)",
+    "CI":  "Infra engineer (CI)",
+    "CS":  "Cybersecurity engineer (CS)",
+    "FE":  "Front-end developer (FE)",
+    "GD":  "Game developer (GD)",
+    "TI":  "Embedded technologie engineer (TI)",
+    "UX":  "UX Designer (UX)",
+}
+
+
+def _import_missing_coach_students_from_excel(xlsx_path: Path, token: "str | None" = None) -> bool:
+    """
+    Leest een Excel-bestand met de studenten van één coach (kolommen Nummer, Naam,
+    Project, Gilde, Sem — zonder aparte 'Coach'-kolom, bijv. 'coach studenten
+    ...xlsx') en voegt de studenten die nog niet in PORTFLOW_COACH_STUDENTS_JSON
+    staan daaraan toe. Omdat het bestand geen coach-kolom heeft, wordt naar de
+    gewenste coach-naam gevraagd (met als voorstel de ingelogde gebruiker).
+    """
+    try:
+        import openpyxl as _xl
+    except ImportError:
+        print("Fout: openpyxl is niet geïnstalleerd. Voer 'pip install openpyxl' uit.")
+        return False
+
+    wb = _xl.load_workbook(xlsx_path, data_only=True)
+    ws = wb.active
+    required_cols = {"Nummer", "Naam", "Project", "Gilde", "Sem"}
+    header_row, raw_headers = _find_header_row(ws, required_cols)
+    if header_row is None:
+        print("Fout: kon geen rij vinden met de vereiste kolomkoppen (Nummer, Naam, Project, Gilde, Sem).")
+        return False
+    col = {_canon_header_key(h): i for i, h in enumerate(raw_headers) if h}
+
+    rows = [
+        row for row in ws.iter_rows(min_row=header_row + 1, values_only=True)
+        if str(row[col["Naam"]] or "").strip()
+    ]
+    if not rows:
+        print("Geen studentrijen gevonden in het Excel-bestand.")
+        return False
+
+    # Bestaande namen in PORTFLOW_COACH_STUDENTS_JSON
+    existing_raw = os.getenv("PORTFLOW_COACH_STUDENTS_JSON", "").strip()
+    try:
+        existing_list: list = json.loads(re.sub(r",\s*([\]\}])", r"\1", existing_raw)) if existing_raw else []
+        if not isinstance(existing_list, list):
+            existing_list = []
+    except Exception:
+        existing_list = []
+    existing_names = {
+        (e.get("name") or "").lower()
+        for e in existing_list
+        if isinstance(e, dict) and not e.get("separator")
+    }
+
+    missing_rows = [r for r in rows if str(r[col["Naam"]] or "").strip().lower() not in existing_names]
+    if not missing_rows:
+        print("Alle studenten uit het Excel-bestand staan al in PORTFLOW_COACH_STUDENTS_JSON.")
+        return False
+
+    print(f"\n{len(missing_rows)} student(en) in het Excel-bestand staan nog niet in PORTFLOW_COACH_STUDENTS_JSON:")
+    for r in missing_rows:
+        print(f"  - {str(r[col['Naam']] or '').strip()}")
+    print()
+
+    default_coach = ""
+    if token:
+        _own = _get_own_user_name(token)
+        if _own:
+            default_coach = _own.split()[0]
+    prompt = f"Coach-naam voor deze student(en)" + (f" (standaard: {default_coach})" if default_coach else "") + ": "
+    coach_name = input(prompt).strip() or default_coach
+    if not coach_name:
+        print("Geannuleerd: geen coach-naam opgegeven.")
+        return False
+
+    ans = input(f"{len(missing_rows)} student(en) toevoegen met coach '{coach_name}'? [J/n] ").strip().lower()
+    if ans not in ("", "j", "y", "ja", "yes"):
+        print("Geannuleerd.")
+        return False
+
+    new_entries = [
+        {
+            "name":         str(r[col["Naam"]] or "").strip(),
+            "start_date":   None,
+            "semester":     _extract_semester_number(str(r[col["Sem"]] or "")),
+            "tribe":        _extract_tribe_from_project(str(r[col["Project"]] or "")),
+            "gilde":        _GILDE_CODE_TO_NAME.get(str(r[col["Gilde"]] or "").strip().upper(), str(r[col["Gilde"]] or "").strip()),
+            "coach":        coach_name,
+            "gildemeester": "",
+        }
+        for r in missing_rows
+    ]
+
+    all_entries = [e for e in existing_list if not e.get("separator")] + new_entries
+    combined = _group_by_tribe(all_entries)
+
+    parts = ["["]
+    for i, e in enumerate(combined):
+        comma = "," if i < len(combined) - 1 else ""
+        parts.append(f"    {json.dumps(e, ensure_ascii=False)}{comma}")
+    parts.append("    ]")
+    json_str = "\n".join(parts)
+
+    _write_env_key("PORTFLOW_COACH_STUDENTS_JSON", json_str)
+    os.environ["PORTFLOW_COACH_STUDENTS_JSON"] = json_str
+    _reload_coach_students()
+    print(f"  {len(new_entries)} student(en) toegevoegd aan PORTFLOW_COACH_STUDENTS_JSON.")
+    return True
+
+
 def _import_students_from_excel(xlsx_path: Path) -> bool:
     """
     Interactief: kies een coach, kies een importmodus en schrijf het resultaat
@@ -1878,7 +2214,7 @@ def _import_students_from_excel(xlsx_path: Path) -> bool:
     wb = _xl.load_workbook(xlsx_path, data_only=True)
     ws = wb.active
     raw_headers = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
-    col = {h: i for i, h in enumerate(raw_headers) if h}
+    col = {_canon_header_key(h): i for i, h in enumerate(raw_headers) if h}
 
     rows = [
         row for row in ws.iter_rows(min_row=2, values_only=True)
@@ -3251,7 +3587,7 @@ def print_coach_table(results, all_names=None, inaccessible_names=None, sem_map=
 
     beroep_width       = max(len("Beroepstaken"), max((len(v) for v in student_beroep.values()), default=0))
     name_width         = max(len("Naam"), max(len(s) for s in student_goals))
-    sem_width          = max(len("Semester"), max((len(f"Semester {_sem_map.get(s, '')}".strip() if _sem_map.get(s) else "") for s in student_goals), default=0))
+    sem_width          = max(len("Sem"),max((len(str(_sem_map.get(s, ""))) for s in student_goals), default=0))
     tribe_width        = max(len("Tribe"), max((len(_tribe_map.get(s, "")) for s in student_goals), default=0))
     gilde_width        = max(len("Gilde"), max((len(_gilde_map.get(s, "")) for s in student_goals), default=0))
     coach_width        = max(len("Coach"), max((len(_coach_map.get(s, "")) for s in student_goals), default=0)) if _coach_map is not None else 0
@@ -3270,7 +3606,7 @@ def print_coach_table(results, all_names=None, inaccessible_names=None, sem_map=
     if _show_tribe:
         _plain_header += f" | {'Tribe':<{tribe_width}}"
     if _show_sem:
-        _plain_header += f" | {'Semester':<{sem_width}}"
+        _plain_header += f" | {'Sem':<{sem_width}}"
     if _show_gilde:
         _plain_header += f" | {'Gilde':<{gilde_width}}"
     if _coach_map is not None:
@@ -3288,7 +3624,7 @@ def print_coach_table(results, all_names=None, inaccessible_names=None, sem_map=
     if _show_tribe:
         header += f" | {'Tribe':<{tribe_width}}"
     if _show_sem:
-        header += f" | {'Semester':<{sem_width}}"
+        header += f" | {'Sem':<{sem_width}}"
     if _show_gilde:
         header += f" | {'Gilde':<{gilde_width}}"
     if _coach_map is not None:
@@ -3310,7 +3646,7 @@ def print_coach_table(results, all_names=None, inaccessible_names=None, sem_map=
         goals = student_goals[student_name]
         display_name = anonymize_name(student_name) if ARGS.anoniem else student_name
         sem_raw = _sem_map.get(student_name, "")
-        sem = f"Semester {sem_raw}" if sem_raw else ""
+        sem = str(sem_raw) if sem_raw else ""
         tribe = _tribe_map.get(student_name, "")
         gilde = _gilde_map.get(student_name, "")
         coach = _coach_map.get(student_name, "") if _coach_map is not None else ""
@@ -3443,34 +3779,24 @@ def _fetch_shared(token):
 
 _migrate_env_add_coach_field()
 
-# Bepaal het te gebruiken Excel-bestand (eenmalig bij opstarten)
+# Bepaal de te gebruiken Excel-bestanden (eenmalig bij opstarten).
+# Er kunnen meerdere .xlsx-bestanden in de map staan met verschillende doelen;
+# per type kolomkoppen wordt onafhankelijk gezocht en zo nodig gevraagd welk
+# bestand gebruikt moet worden.
 _xlsx_candidates = _find_excel_with_student_columns() if ARGS.admin else []
-if ARGS.admin and len(_xlsx_candidates) > 1:
-    _HL = "\033[48;2;100;160;220m\033[1m"
-    _RS = "\033[0m"
-    print("\nMeerdere Excel-bestanden gevonden met de juiste kolomkoppen:")
-    for _i, (_, _fn_c) in enumerate(_xlsx_candidates, 1):
-        print(f"  {_i}) [{_fn_c}]")
-    print()
-    _raw_xls = input(f"Welk bestand wil je gebruiken? (1-{len(_xlsx_candidates)}): ").strip()
-    if _raw_xls.isdigit() and 1 <= int(_raw_xls) <= len(_xlsx_candidates):
-        _xlsx_idx = int(_raw_xls) - 1
-        print(f"\033[{len(_xlsx_candidates) + 3}A\033[J", end="")
-        print("\nMeerdere Excel-bestanden gevonden met de juiste kolomkoppen:")
-        for _i, (_, _fn_c) in enumerate(_xlsx_candidates, 1):
-            if _i - 1 == _xlsx_idx:
-                print(f"  {_HL}{_i}) [{_fn_c}]{_RS}")
-            else:
-                print(f"  {_i}) [{_fn_c}]")
-        print()
-        print(f"Welk bestand wil je gebruiken? (1-{len(_xlsx_candidates)}): {_raw_xls}")
-        _xlsx_info: "tuple[Path, str] | None" = _xlsx_candidates[_xlsx_idx]
-    else:
-        _xlsx_info = _xlsx_candidates[0]
-elif _xlsx_candidates:
-    _xlsx_info = _xlsx_candidates[0]
-else:
-    _xlsx_info = None
+_xlsx_info: "tuple[Path, str] | None" = _choose_xlsx_candidate(
+    _xlsx_candidates, "studenten importeren (Nummer, Naam, Email, ...)"
+)
+
+_gm_xlsx_candidates = _find_excel_with_gildemeester_columns() if ARGS.admin else []
+_gm_xlsx_info: "tuple[Path, str] | None" = _choose_xlsx_candidate(
+    _gm_xlsx_candidates, "gildemeester-studenten importeren (Student, Coach, Semester, Gildemeester)"
+)
+
+_mc_xlsx_candidates = _find_excel_with_missing_coach_columns() if ARGS.admin else []
+_mc_xlsx_info: "tuple[Path, str] | None" = _choose_xlsx_candidate(
+    _mc_xlsx_candidates, "ontbrekende coach-studenten importeren (Nummer, Naam, Project, Gilde, Sem)"
+)
 
 try:
     while True:
@@ -3490,14 +3816,22 @@ try:
             _valid_choices.update({"5", "6", "7"})
             if _xlsx_info:
                 _valid_choices.update({"3", "4", "8"})
+            if _gm_xlsx_info:
+                _valid_choices.add("9")
+            if _mc_xlsx_info:
+                _valid_choices.add("10")
 
         _fn = f"[{_xlsx_info[1]}]" if _xlsx_info else ""
+        _gm_fn = f"[{_gm_xlsx_info[1]}]" if _gm_xlsx_info else ""
+        _mc_fn = f"[{_mc_xlsx_info[1]}]" if _mc_xlsx_info else ""
         _opt1 = f"  {_HL}1) Één student{_RS}" if _pre_qty == "1" else "  1) Één student"
         _opt2 = f"  {_HL}2) Meerdere studenten{_RS}" if _pre_qty == "2" else "  2) Meerdere studenten"
         _opt5_txt = "5) Toon alle studenten waarvan ik het portfolio kan zien en voeg er eentje toe aan .env"
         _opt6_txt = "6) Toon alle studenten die evaluatieverzoeken naar mij stuurden en voeg er eentje toe aan .env"
         _opt7_txt = "7) Toon studenten die evaluatieverzoeken stuurden maar niet mijn coach-student zijn, en niet in PORTFLOW_GILDE_STUDENTS_JSON staan, en voeg er eentje toe aan .env"
         _opt8_txt = lambda fn: f"8) Vul semester, tribe en gilde aan voor bestaande studenten in alle drie groepen vanuit {fn}"
+        _opt9_txt = lambda fn: f"9) Lees {fn}, kies een gildemeester, en voeg studenten toe aan PORTFLOW_GILDE_STUDENTS_JSON"
+        _opt10_txt = lambda fn: f"10) Lees {fn}, en voeg ontbrekende studenten toe aan PORTFLOW_COACH_STUDENTS_JSON"
         print("\nVoor hoeveel studenten wil je de evaluaties zien? (commandline: --aantal 1  of  --aantal meer)")
         print(_opt1)
         print(_opt2)
@@ -3513,6 +3847,12 @@ try:
             _menu_lines += 3
             if _xlsx_info:
                 print(f"  {_opt8_txt(_fn)}")
+                _menu_lines += 1
+            if _gm_xlsx_info:
+                print(f"  {_opt9_txt(_gm_fn)}")
+                _menu_lines += 1
+            if _mc_xlsx_info:
+                print(f"  {_opt10_txt(_mc_fn)}")
                 _menu_lines += 1
 
         if _pre_qty:
@@ -3542,6 +3882,12 @@ try:
                     if _xlsx_info:
                         _opt8h = f"  {_HL}{_opt8_txt(_fn)}{_RS}" if qty == "8" else f"  {_opt8_txt(_fn)}"
                         print(_opt8h)
+                    if _gm_xlsx_info:
+                        _opt9h = f"  {_HL}{_opt9_txt(_gm_fn)}{_RS}" if qty == "9" else f"  {_opt9_txt(_gm_fn)}"
+                        print(_opt9h)
+                    if _mc_xlsx_info:
+                        _opt10h = f"  {_HL}{_opt10_txt(_mc_fn)}{_RS}" if qty == "10" else f"  {_opt10_txt(_mc_fn)}"
+                        print(_opt10h)
 
         if qty == "3":
             if _xlsx_info:
@@ -3568,6 +3914,16 @@ try:
         if qty == "8":
             if _xlsx_info:
                 _enrich_env_from_excel(_xlsx_info[0])
+            continue
+
+        if qty == "9":
+            if _gm_xlsx_info:
+                _import_gildemeester_students_from_excel(_gm_xlsx_info[0])
+            continue
+
+        if qty == "10":
+            if _mc_xlsx_info:
+                _import_missing_coach_students_from_excel(_mc_xlsx_info[0], token)
             continue
 
         if qty.lower() == "q":
