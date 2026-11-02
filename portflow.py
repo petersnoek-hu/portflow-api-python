@@ -78,6 +78,10 @@ def load_env_file(env_path: Path | None = None) -> None:
         os.environ[key] = value
 
 
+# Toegestane waarden voor het veld 'rol' in de studentlijsten in .env
+STUDENT_ROLLEN = ("PO", "SM", "2ePO", "2eSM")
+
+
 def parse_coach_students(raw_json: str):
     if not raw_json.strip():
         return []
@@ -101,7 +105,7 @@ def parse_coach_students(raw_json: str):
 
         # Separator entry: {"separator": true}
         if entry.get("separator") is True:
-            students.append((SEPARATOR_SENTINEL, None, "", "", "", "", "", ""))
+            students.append((SEPARATOR_SENTINEL, None, "", "", "", "", "", "", ""))
             continue
 
         name = str(entry.get("name") or "").strip()
@@ -129,8 +133,15 @@ def parse_coach_students(raw_json: str):
         coach = str(entry.get("coach") or "").strip()
         gildemeester = str(entry.get("gildemeester") or "").strip()
         resultaat = str(entry.get("resultaat") or "").strip().lower()
+        rol = str(entry.get("rol") or "").strip()
+        if rol:
+            _canon = {r.lower(): r for r in STUDENT_ROLLEN}
+            if rol.lower() in _canon:
+                rol = _canon[rol.lower()]
+            else:
+                print(f"Waarschuwing: onbekende rol '{rol}' voor student {name} (verwacht: {', '.join(STUDENT_ROLLEN)}).")
 
-        students.append((name, start_date, semester, tribe, gilde, coach, gildemeester, resultaat))
+        students.append((name, start_date, semester, tribe, gilde, coach, gildemeester, resultaat, rol))
 
     return students
 
@@ -490,6 +501,7 @@ COACH_STUDENT_GILDE        = {name: gilde for name, _, _, _, gilde, *_ in CURREN
 COACH_STUDENT_COACH        = {name: coach for name, _, _, _, _, coach, *_ in CURRENT_COACH_STUDENTS if coach}
 COACH_STUDENT_GILDEMEESTER = {name: gm   for name, _, _, _, _, _, gm, *_ in CURRENT_COACH_STUDENTS if gm}
 COACH_STUDENT_RESULTAAT    = {name: res for name, _, _, _, _, _, _, res, *_ in CURRENT_COACH_STUDENTS if res}
+COACH_STUDENT_ROL          = {name: rol for name, _, _, _, _, _, _, _, rol, *_ in CURRENT_COACH_STUDENTS if rol}
 
 # Tribe-brede lijst (eigen studenten + collega's) uit .env
 CURRENT_TRIBE_STUDENTS = parse_coach_students(
@@ -503,6 +515,7 @@ TRIBE_STUDENT_GILDE        = {name: gilde for name, _, _, _, gilde, *_ in CURREN
 TRIBE_STUDENT_COACH        = {name: coach for name, _, _, _, _, coach, *_ in CURRENT_TRIBE_STUDENTS if coach}
 TRIBE_STUDENT_GILDEMEESTER = {name: gm   for name, _, _, _, _, _, gm, *_ in CURRENT_TRIBE_STUDENTS if gm}
 TRIBE_STUDENT_RESULTAAT    = {name: res for name, _, _, _, _, _, _, res, *_ in CURRENT_TRIBE_STUDENTS if res}
+TRIBE_STUDENT_ROL          = {name: rol for name, _, _, _, _, _, _, _, rol, *_ in CURRENT_TRIBE_STUDENTS if rol}
 
 # Gilde-brede lijst uit .env
 CURRENT_GILDE_STUDENTS = parse_coach_students(
@@ -516,6 +529,7 @@ GILDE_STUDENT_GILDE        = {name: gilde for name, _, _, _, gilde, *_ in CURREN
 GILDE_STUDENT_COACH        = {name: coach for name, _, _, _, _, coach, *_ in CURRENT_GILDE_STUDENTS if coach}
 GILDE_STUDENT_GILDEMEESTER = {name: gm   for name, _, _, _, _, _, gm, *_ in CURRENT_GILDE_STUDENTS if gm}
 GILDE_STUDENT_RESULTAAT    = {name: res for name, _, _, _, _, _, _, res, *_ in CURRENT_GILDE_STUDENTS if res}
+GILDE_STUDENT_ROL          = {name: rol for name, _, _, _, _, _, _, _, rol, *_ in CURRENT_GILDE_STUDENTS if rol}
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -572,7 +586,7 @@ def parse_args():
         "--verberg",
         default=None,
         metavar="KOLOMMEN",
-        help="Verberg kolommen in de tabel (komma-gescheiden): Tribe, Semester, Gilde of 'alles'",
+        help="Verberg kolommen in de tabel (komma-gescheiden): Beroepstaken, Tribe, Semester, Gilde, Rol, Gildemeester of 'alles'",
     )
     parser.add_argument(
         "--config",
@@ -584,10 +598,10 @@ def parse_args():
 
 
 def parse_hidden_columns(raw: str | None) -> set:
-    """Zet de --verberg waarde om in een set kolomnamen ('Tribe','Semester','Gilde')."""
+    """Zet de --verberg waarde om in een set kolomnamen ('Beroepstaken','Tribe','Semester','Gilde','Rol','Gildemeester')."""
     if not raw:
         return set()
-    _known = {"tribe": "Tribe", "semester": "Semester", "gilde": "Gilde"}
+    _known = {"beroepstaken": "Beroepstaken", "tribe": "Tribe", "semester": "Semester", "gilde": "Gilde", "rol": "Rol", "gildemeester": "Gildemeester"}
     hidden: set = set()
     for part in raw.split(","):
         key = part.strip().lower()
@@ -1287,7 +1301,7 @@ def _write_env_key(key: str, value: str) -> None:
 def _reload_coach_students() -> None:
     """Herlaadt PORTFLOW_COACH_STUDENTS_JSON vanuit os.environ in de globale lookups."""
     global CURRENT_COACH_STUDENTS, COACH_STUDENT_NAMES, COACH_STUDENT_START_DATES
-    global COACH_STUDENT_SEMESTER, COACH_STUDENT_TRIBE, COACH_STUDENT_GILDE, COACH_STUDENT_COACH, COACH_STUDENT_GILDEMEESTER, COACH_STUDENT_RESULTAAT
+    global COACH_STUDENT_SEMESTER, COACH_STUDENT_TRIBE, COACH_STUDENT_GILDE, COACH_STUDENT_COACH, COACH_STUDENT_GILDEMEESTER, COACH_STUDENT_RESULTAAT, COACH_STUDENT_ROL
     CURRENT_COACH_STUDENTS = parse_coach_students(
         os.getenv("PORTFLOW_COACH_STUDENTS_JSON", "").strip()
     )
@@ -1301,12 +1315,13 @@ def _reload_coach_students() -> None:
     COACH_STUDENT_COACH        = {name: coach for name, _, _, _, _, coach, *_ in CURRENT_COACH_STUDENTS if coach}
     COACH_STUDENT_GILDEMEESTER = {name: gm   for name, _, _, _, _, _, gm, *_ in CURRENT_COACH_STUDENTS if gm}
     COACH_STUDENT_RESULTAAT    = {name: res for name, _, _, _, _, _, _, res, *_ in CURRENT_COACH_STUDENTS if res}
+    COACH_STUDENT_ROL          = {name: rol for name, _, _, _, _, _, _, _, rol, *_ in CURRENT_COACH_STUDENTS if rol}
 
 
 def _reload_tribe_students() -> None:
     """Herlaadt PORTFLOW_TRIBE_STUDENTS_JSON vanuit os.environ in de globale lookups."""
     global CURRENT_TRIBE_STUDENTS, TRIBE_STUDENT_NAMES, TRIBE_STUDENT_START_DATES
-    global TRIBE_STUDENT_SEMESTER, TRIBE_STUDENT_TRIBE, TRIBE_STUDENT_GILDE, TRIBE_STUDENT_COACH, TRIBE_STUDENT_GILDEMEESTER, TRIBE_STUDENT_RESULTAAT
+    global TRIBE_STUDENT_SEMESTER, TRIBE_STUDENT_TRIBE, TRIBE_STUDENT_GILDE, TRIBE_STUDENT_COACH, TRIBE_STUDENT_GILDEMEESTER, TRIBE_STUDENT_RESULTAAT, TRIBE_STUDENT_ROL
     CURRENT_TRIBE_STUDENTS = parse_coach_students(
         os.getenv("PORTFLOW_TRIBE_STUDENTS_JSON", "").strip()
     )
@@ -1318,12 +1333,13 @@ def _reload_tribe_students() -> None:
     TRIBE_STUDENT_COACH        = {name: coach for name, _, _, _, _, coach, *_ in CURRENT_TRIBE_STUDENTS if coach}
     TRIBE_STUDENT_GILDEMEESTER = {name: gm   for name, _, _, _, _, _, gm, *_ in CURRENT_TRIBE_STUDENTS if gm}
     TRIBE_STUDENT_RESULTAAT    = {name: res for name, _, _, _, _, _, _, res, *_ in CURRENT_TRIBE_STUDENTS if res}
+    TRIBE_STUDENT_ROL          = {name: rol for name, _, _, _, _, _, _, _, rol, *_ in CURRENT_TRIBE_STUDENTS if rol}
 
 
 def _reload_gilde_students() -> None:
     """Herlaadt PORTFLOW_GILDE_STUDENTS_JSON vanuit os.environ in de globale lookups."""
     global CURRENT_GILDE_STUDENTS, GILDE_STUDENT_NAMES, GILDE_STUDENT_START_DATES
-    global GILDE_STUDENT_SEMESTER, GILDE_STUDENT_TRIBE, GILDE_STUDENT_GILDE, GILDE_STUDENT_COACH, GILDE_STUDENT_GILDEMEESTER, GILDE_STUDENT_RESULTAAT
+    global GILDE_STUDENT_SEMESTER, GILDE_STUDENT_TRIBE, GILDE_STUDENT_GILDE, GILDE_STUDENT_COACH, GILDE_STUDENT_GILDEMEESTER, GILDE_STUDENT_RESULTAAT, GILDE_STUDENT_ROL
     CURRENT_GILDE_STUDENTS = parse_coach_students(
         os.getenv("PORTFLOW_GILDE_STUDENTS_JSON", "").strip()
     )
@@ -1335,6 +1351,7 @@ def _reload_gilde_students() -> None:
     GILDE_STUDENT_COACH        = {name: coach for name, _, _, _, _, coach, *_ in CURRENT_GILDE_STUDENTS if coach}
     GILDE_STUDENT_GILDEMEESTER = {name: gm   for name, _, _, _, _, _, gm, *_ in CURRENT_GILDE_STUDENTS if gm}
     GILDE_STUDENT_RESULTAAT    = {name: res for name, _, _, _, _, _, _, res, *_ in CURRENT_GILDE_STUDENTS if res}
+    GILDE_STUDENT_ROL          = {name: rol for name, _, _, _, _, _, _, _, rol, *_ in CURRENT_GILDE_STUDENTS if rol}
 
 
 def _migrate_env_add_coach_field() -> None:
@@ -1424,7 +1441,7 @@ def _pick_env_group_and_add(student_name: str) -> bool:
         print(f"  '{student_name}' staat al in {env_key}.")
         return False
 
-    existing_list.append({"name": student_name, "start_date": None, "semester": "", "tribe": "", "gilde": "", "coach": "", "gildemeester": ""})
+    existing_list.append({"name": student_name, "start_date": None, "semester": "", "tribe": "", "gilde": "", "coach": "", "gildemeester": "", "rol": ""})
     existing_list = _group_by_tribe([e for e in existing_list if not e.get("separator")])
 
     parts = ["["]
@@ -2113,6 +2130,7 @@ def _import_gilde_from_excel(xlsx_path: Path) -> bool:
             "gilde":        str(r[col["Gilde voorkeur"]] or "").strip(),
             "coach":        str(r[col["Coach"]] or "").strip(),
             "gildemeester": "",
+            "rol":          "",
         }
         for r in gilde_rows
         if str(r[col["Naam"]] or "").strip()
@@ -2253,6 +2271,7 @@ def _import_gildemeester_students_from_excel(xlsx_path: Path) -> bool:
             "gilde":        _row_gildemeester_gilde(r, col),
             "coach":        str(r[col["Coach"]] or "").strip(),
             "gildemeester": chosen,
+            "rol":          "",
         }
         for r in gm_rows
         if str(r[col["Student"]] or "").strip()
@@ -2393,6 +2412,7 @@ def _import_missing_coach_students_from_excel(xlsx_path: Path, token: "str | Non
             "gilde":        _GILDE_CODE_TO_NAME.get(str(r[col["Gilde"]] or "").strip().upper(), str(r[col["Gilde"]] or "").strip()),
             "coach":        coach_name,
             "gildemeester": "",
+            "rol":          "",
         }
         for r in missing_rows
     ]
@@ -2475,6 +2495,7 @@ def _import_students_from_excel(xlsx_path: Path) -> bool:
             "gilde":        str(r[col["Gilde voorkeur"]] or "").strip(),
             "coach":        chosen,
             "gildemeester": "",
+            "rol":          "",
         }
 
     excel_by_name = {
@@ -3714,6 +3735,12 @@ def print_coach_table(results, all_names=None, inaccessible_names=None, sem_map=
     _gilde_map = gilde_map if gilde_map is not None else COACH_STUDENT_GILDE
     _resultaat_map = resultaat_map if resultaat_map is not None else COACH_STUDENT_RESULTAAT
     _coach_map = coach_map  # None = geen Coach-kolom tonen
+    # Gildemeester uit alle .env-lijsten; bij dubbelingen wint de gildelijst
+    _gildemeester_map = gildemeester_map if gildemeester_map is not None else {
+        **COACH_STUDENT_GILDEMEESTER, **TRIBE_STUDENT_GILDEMEESTER, **GILDE_STUDENT_GILDEMEESTER
+    }
+    # Rol (PO/SM/2ePO/2eSM) uit alle .env-lijsten; bij dubbelingen wint de gildelijst
+    _rol_map = {**COACH_STUDENT_ROL, **TRIBE_STUDENT_ROL, **GILDE_STUDENT_ROL}
 
     # Achtergrondkleuren per groep (24-bit ANSI, passend bij de Open ICT kleurkaart)
     _BG_BLUE  = "\033[48;2;119;140;163m"   # blauw-grijs  (OC, KO, JKO, KPM)
@@ -3778,28 +3805,35 @@ def print_coach_table(results, all_names=None, inaccessible_names=None, sem_map=
     sem_width          = max(len("Sem"),max((len(str(_sem_map.get(s, ""))) for s in student_goals), default=0))
     tribe_width        = max(len("Tribe"), max((len(_tribe_map.get(s, "")) for s in student_goals), default=0))
     gilde_width        = max(len("Gilde"), max((len(_gilde_map.get(s, "")) for s in student_goals), default=0))
+    rol_width          = max(len("Rol"), max((len(_rol_map.get(s, "")) for s in student_goals), default=0))
     coach_width        = max(len("Coach"), max((len(_coach_map.get(s, "")) for s in student_goals), default=0)) if _coach_map is not None else 0
-    gildemeester_width = max(len("Gildemeester"), max((len(gildemeester_map.get(s, "")) for s in student_goals), default=0)) if gildemeester_map is not None else 0
+    gildemeester_width = max(len("Gildemeester"), max((len(_gildemeester_map.get(s, "")) for s in student_goals), default=0))
 
-    # Welke van de drie meest rechtse kolommen tonen we? (zie --verberg)
+    # Welke optionele kolommen tonen we? (zie --verberg)
+    _show_beroep = "Beroepstaken" not in HIDDEN_COLUMNS
     _show_tribe = "Tribe" not in HIDDEN_COLUMNS
     _show_sem   = "Semester" not in HIDDEN_COLUMNS
     _show_gilde = "Gilde" not in HIDDEN_COLUMNS
+    _show_rol   = "Rol" not in HIDDEN_COLUMNS
+    _show_gildemeester = "Gildemeester" not in HIDDEN_COLUMNS
 
     # Bereken visuele breedte voor de scheidingslijn (zonder ANSI-codes)
     _plain_header = f"{'Naam':<{name_width}}"
     for (_, abbrev), w in zip(GOAL_COLUMNS, col_widths):
         _plain_header += f" | {abbrev:<{w}}"
-    _plain_header += f" | {'Beroepstaken':<{beroep_width}}"
+    if _show_beroep:
+        _plain_header += f" | {'Beroepstaken':<{beroep_width}}"
     if _show_tribe:
         _plain_header += f" | {'Tribe':<{tribe_width}}"
     if _show_sem:
         _plain_header += f" | {'Sem':<{sem_width}}"
     if _show_gilde:
         _plain_header += f" | {'Gilde':<{gilde_width}}"
+    if _show_rol:
+        _plain_header += f" | {'Rol':<{rol_width}}"
     if _coach_map is not None:
         _plain_header += f" | {'Coach':<{coach_width}}"
-    if gildemeester_map is not None:
+    if _show_gildemeester:
         _plain_header += f" | {'Gildemeester':<{gildemeester_width}}"
     separator = "-" * len(_plain_header)
 
@@ -3808,16 +3842,19 @@ def print_coach_table(results, all_names=None, inaccessible_names=None, sem_map=
     for (full_name, abbrev), w in zip(GOAL_COLUMNS, col_widths):
         bg = _GOAL_BG[full_name]
         header += f" | {bg}{abbrev:<{w}}{_RESET}"
-    header += f" | {_BG_PURPLE}{'Beroepstaken':<{beroep_width}}{_RESET}"
+    if _show_beroep:
+        header += f" | {_BG_PURPLE}{'Beroepstaken':<{beroep_width}}{_RESET}"
     if _show_tribe:
         header += f" | {'Tribe':<{tribe_width}}"
     if _show_sem:
         header += f" | {'Sem':<{sem_width}}"
     if _show_gilde:
         header += f" | {'Gilde':<{gilde_width}}"
+    if _show_rol:
+        header += f" | {'Rol':<{rol_width}}"
     if _coach_map is not None:
         header += f" | {'Coach':<{coach_width}}"
-    if gildemeester_map is not None:
+    if _show_gildemeester:
         header += f" | {'Gildemeester':<{gildemeester_width}}"
     print()
     print(header)
@@ -3838,10 +3875,12 @@ def print_coach_table(results, all_names=None, inaccessible_names=None, sem_map=
         tribe = _tribe_map.get(student_name, "")
         gilde = _gilde_map.get(student_name, "")
         coach = _coach_map.get(student_name, "") if _coach_map is not None else ""
-        gildemeester = gildemeester_map.get(student_name, "") if gildemeester_map is not None else ""
+        gildemeester = _gildemeester_map.get(student_name, "")
+        rol = _rol_map.get(student_name, "")
         display_tribe        = "******" if ARGS.anoniem else tribe
         display_sem          = "******" if ARGS.anoniem else sem
         display_gilde        = "******" if ARGS.anoniem else gilde
+        display_rol          = "******" if ARGS.anoniem else rol
         display_coach        = "******" if ARGS.anoniem else coach
         display_gildemeester = "******" if ARGS.anoniem else gildemeester
 
@@ -3851,16 +3890,19 @@ def print_coach_table(results, all_names=None, inaccessible_names=None, sem_map=
             for (full_name, _), w in zip(GOAL_COLUMNS, col_widths):
                 bg = _GOAL_BG[full_name]
                 row += f" | \033[2m{'n/b' if w >= 3 else '-':<{w}}\033[0m"
-            row += f" | \033[2m{'n/b' if beroep_width >= 3 else '-':<{beroep_width}}\033[0m"
+            if _show_beroep:
+                row += f" | \033[2m{'n/b' if beroep_width >= 3 else '-':<{beroep_width}}\033[0m"
             if _show_tribe:
                 row += f" | \033[2m{display_tribe:<{tribe_width}}\033[0m"
             if _show_sem:
                 row += f" | \033[2m{display_sem:<{sem_width}}\033[0m"
             if _show_gilde:
                 row += f" | \033[2m{display_gilde:<{gilde_width}}\033[0m"
+            if _show_rol:
+                row += f" | \033[2m{display_rol:<{rol_width}}\033[0m"
             if _coach_map is not None:
                 row += f" | \033[2m{display_coach:<{coach_width}}\033[0m"
-            if gildemeester_map is not None:
+            if _show_gildemeester:
                 row += f" | \033[2m{display_gildemeester:<{gildemeester_width}}\033[0m"
             print(row)
             continue
@@ -3884,7 +3926,8 @@ def print_coach_table(results, all_names=None, inaccessible_names=None, sem_map=
                 row += f" | \033[104m{cell:<{w}}\033[0m"
             else:
                 row += f" | {cell:<{w}}"
-        row += f" | {student_beroep.get(student_name, ''):<{beroep_width}}"
+        if _show_beroep:
+            row += f" | {student_beroep.get(student_name, ''):<{beroep_width}}"
         if _show_tribe:
             row += f" | {display_tribe:<{tribe_width}}"
         if _show_sem:
@@ -3901,9 +3944,11 @@ def print_coach_table(results, all_names=None, inaccessible_names=None, sem_map=
                 row += f" | {display_sem:<{sem_width}}"
         if _show_gilde:
             row += f" | {display_gilde:<{gilde_width}}"
+        if _show_rol:
+            row += f" | {display_rol:<{rol_width}}"
         if _coach_map is not None:
             row += f" | {display_coach:<{coach_width}}"
-        if gildemeester_map is not None:
+        if _show_gildemeester:
             row += f" | {display_gildemeester:<{gildemeester_width}}"
         print(row)
 
