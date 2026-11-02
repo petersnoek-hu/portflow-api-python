@@ -1,0 +1,9 @@
+# API-aanroepen (alle scripts)
+requests>=2.28
+
+# Studenten importeren uit Excel (portflow.py --admin)
+openpyxl>=3.1
+
+# Token ophalen via een browservenster (portflow.py, retrieve_token.py)
+# Daarna eventueel: python3 -m playwright install chromium (als Google Chrome ontbreekt)
+playwright>=1.40

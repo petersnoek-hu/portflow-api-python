@@ -20,27 +20,21 @@ De tekstbestanden `vaardigheden.txt`, `beroepstaken.txt` en `beroepsrollen.txt` 
 - Python 3.10+
 - Python-packages:
 
-| Package | Nodig voor | Verplicht |
-|---|---|---|
-| `requests` | Alle API-aanroepen (alle scripts) | ja |
-| `openpyxl` | Studenten importeren uit Excel-bestanden (`portflow.py --admin`) | nee |
-| `playwright` | Token ophalen via een browservenster (`portflow.py` bij een verlopen token, en `retrieve_token.py`) | nee |
+| Package | Nodig voor |
+|---|---|
+| `requests` | Alle API-aanroepen (alle scripts) |
+| `openpyxl` | Studenten importeren uit Excel-bestanden (`portflow.py --admin`) |
+| `playwright` | Token ophalen via een browservenster (`portflow.py` bij een verlopen token, en `retrieve_token.py`) |
 
 - Voor `playwright`: Google Chrome, of anders Playwright Chromium (`python3 -m playwright install chromium`).
 
-Alles installeren:
+Installeer alle packages met [`requirements.txt`](requirements.txt), bij voorkeur in een virtuele omgeving:
 
 ```bash
-pip install requests openpyxl playwright
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 ```
-
-Alleen het minimum:
-
-```bash
-pip install requests
-```
-
-`portflow.py` meldt bij het starten of `requests` of `openpyxl` ontbreekt. Zonder `openpyxl` werkt alles behalve de Excel-import. Ontbreekt `playwright` en kies je voor het browservenster, dan biedt het script aan het te installeren; je kunt het token ook altijd plakken.
 
 ## Configuratie (`.env`)
 
@@ -83,8 +77,9 @@ Alleen `name` is verplicht; ontbrekende velden blijven leeg.
 | `tribe` | tekst | Kolom *Tribe*; ook gebruikt om de keuzelijst bij één student te groeperen. |
 | `gilde` | tekst, bijv. `"FE"` | Kolom *Gilde*. |
 | `coach` | tekst | Kolom *Coach* in de tribe- en gildetabel. |
-| `gildemeester` | tekst | Kolom *Gildemeester* in de gildetabel en in de evaluatielijst voor gildestudenten. |
+| `gildemeester` | tekst | Kolom *Gildemeester* in de tabel en in de evaluatielijst voor gildestudenten. |
 | `resultaat` | `"geslaagd"` of `"gezakt"` | Kleurt de *Sem*-cel donkergroen of rood. |
+| `rol` | `"PO"`, `"SM"`, `"2ePO"`, `"2eSM"` of leeg | Kolom *Rol* in de tabel (productowner, scrummaster, 2e PO, 2e SM). |
 | `separator` | `true` | Geen student maar een scheidingslijn in de tabel. |
 
 Let op: bij het starten voegt `portflow.py` aan elke student zonder `coach` het veld `"coach": ""` toe en schrijft de lijst daarvoor opnieuw weg in `.env`.
@@ -120,8 +115,8 @@ python3 portflow.py --aantal meer --lijst coach --anoniem
 | `--lijst {alles,coach,tribe,gilde}` | Kies direct de groep: `alles` = alle studenten die hun portfolio met je delen; `coach`, `tribe`, `gilde` = de lijst uit `.env`. Wordt genegeerd als die lijst leeg is. |
 | `--student N` | Kies direct de N-de student uit de lijst (alleen met `--aantal 1`). |
 | `--vraagtekens 1` | Toon ook ingediende maar nog niet beoordeelde evaluaties, als `?`. |
-| `--verberg KOLOMMEN` | Verberg kolommen in de tabel, komma-gescheiden: `Tribe`, `Semester`, `Gilde` of `alles`. |
-| `--anoniem` | Vervang namen (en tribe, semester, gilde) door sterretjes, bijv. bij een screenshare. |
+| `--verberg KOLOMMEN` | Verberg kolommen in de tabel, komma-gescheiden: `Beroepstaken`, `Tribe`, `Semester`, `Gilde`, `Rol`, `Gildemeester` of `alles`. |
+| `--anoniem` | Vervang namen (en tribe, semester, gilde, rol, gildemeester) door sterretjes, bijv. bij een screenshare. |
 | `--admin` | Toon de beheeropties in het hoofdmenu (zie [Beheer](#beheer---admin)). |
 | `--config BESTAND` | Gebruik een ander `.env`-bestand. |
 | `--debug-api` | Log alle API-aanroepen met antwoord naar `api_debug_log.jsonl`. |
@@ -144,14 +139,14 @@ python3 portflow.py --aantal meer --lijst coach --anoniem
 | Keuze | Wat je ziet |
 |---|---|
 | Tabel met alle studenten die hun portfolio met mij hebben gedeeld | Tabel voor iedereen die zijn portfolio met je deelt. |
-| Tabel met al mijn coach-/tribe-/gildestudenten | Tabel voor de lijst uit `.env` (alleen als die gevuld is), in de volgorde van `.env`. De tribe- en gildetabel hebben een extra kolom *Coach*, de gildetabel ook *Gildemeester*. In de tribe- en gildetabel staan studenten van wie je het portfolio niet kunt zien met `n/b`. |
+| Tabel met al mijn coach-/tribe-/gildestudenten | Tabel voor de lijst uit `.env` (alleen als die gevuld is), in de volgorde van `.env`. De tribe- en gildetabel hebben een extra kolom *Coach*. In de tribe- en gildetabel staan studenten van wie je het portfolio niet kunt zien met `n/b`. |
 | Evaluaties die ik nog moet beoordelen (coachstudenten) | Genummerde lijst van openstaande evaluatieverzoeken aan jou van je coachstudenten, met de vaardigheden en zelfgekozen niveaus. Kies een nummer voor de details. |
 | Evaluaties die ik nog moet beoordelen (gildestudenten) | Hetzelfde voor alle andere studenten die je een verzoek stuurden, met kolommen *Coach* en *Gildemeester*. |
 | Grafieken voor alle studenten die ik coach | Per coachstudent een weekgrafiek. |
 
 ### De tabel
 
-Per student een rij met de tien vaardigheden (`OC`, `KO`, `JKO`, `KPM`, `PL`, `BD`, `SW`, `FO`, `PH`, `RE`), een kolom *Beroepstaken* en de kolommen *Tribe*, *Sem* en *Gilde*. In een vaardigheidscel staan de behaalde niveaus, bijv. `2, 1`; met `--vraagtekens 1` ook `?` voor evaluaties die nog wachten op beoordeling. *Beroepstaken* telt de beoordelingen per niveau, bijv. `3x2, 1x1`. Onder de tabel staat een weekgrafiek van alle evaluaties.
+Per student een rij met de tien vaardigheden (`OC`, `KO`, `JKO`, `KPM`, `PL`, `BD`, `SW`, `FO`, `PH`, `RE`), een kolom *Beroepstaken* en de kolommen *Tribe*, *Sem*, *Gilde*, *Rol* en *Gildemeester* (uit de `.env`-lijsten). In een vaardigheidscel staan de behaalde niveaus, bijv. `2, 1`; met `--vraagtekens 1` ook `?` voor evaluaties die nog wachten op beoordeling. *Beroepstaken* telt de beoordelingen per niveau, bijv. `3x2, 1x1`. Onder de tabel staat een weekgrafiek van alle evaluaties.
 
 ```text
 Naam         | OC | KO | JKO | KPM | PL   | BD | SW   | FO | PH   | RE | Beroepstaken | Tribe   | Sem | Gilde
