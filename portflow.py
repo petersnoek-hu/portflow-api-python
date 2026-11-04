@@ -893,10 +893,25 @@ def _ask_new_token() -> str:
 #   3. Luister naar alle uitgaande requests (ook vanuit het Portflow-iframe) en onderschep
 #      de 'Authorization: Bearer ...' header naar portflow.io / hu.nl / drieam.app.
 #   4. Controleer de token tegen /api/v1/dashboard.
+#   5. Lees het eigen portfolio-ID uit de startgegevens van de Portflow-pagina (data-react-props)
+#      en sla het op als PORTFLOW_OWN_PORTFOLIO_ID.
 
 CANVAS_URL = "https://canvas.hu.nl/courses/51659/external_tools/1134"
 TOKEN_HOST_SUFFIXES = ("portflow.io", "hu.nl", "drieam.app")
 BROWSER_TOKEN_TIMEOUT_S = 300
+# Seconden dat na het vinden van de token nog op het portfolio-ID gewacht wordt
+PORTFOLIO_ID_GRACE_S = 10
+# De Portflow-pagina krijgt bij het laden haar startgegevens mee in data-react-props;
+# daarin staat het portfolio van de ingelogde gebruiker (portfolio.id).
+OWN_PORTFOLIO_ID_JS = """() => {
+  for (const el of document.querySelectorAll('div[data-react-class]')) {
+    try {
+      const props = JSON.parse(el.dataset.reactProps || '{}');
+      if (props.portfolio && props.portfolio.id) return String(props.portfolio.id);
+    } catch (e) {}
+  }
+  return null;
+}"""
 # Browserprofiel naast het script, zodat de Canvas/HU-login tussen runs bewaard blijft
 BROWSER_PROFILE_DIR = _get_exe_dir() / ".browser-profile"
 
@@ -989,8 +1004,106 @@ def _launch_browser_context(p):
         return None
 
 
+def _read_own_portfolio_id(context) -> str | None:
+    """Zoek in alle Portflow-frames naar het portfolio-ID van de ingelogde gebruiker."""
+    from playwright.sync_api import Error as PlaywrightError
+
+    for page in context.pages:
+        for frame in page.frames:
+            if not (urlparse(frame.url).hostname or "").endswith("drieam.app"):
+                continue
+            try:
+                portfolio_id = frame.evaluate(OWN_PORTFOLIO_ID_JS)
+            except PlaywrightError:
+                continue
+            if portfolio_id and str(portfolio_id).isdigit():
+                return str(portfolio_id)
+    return None
+
+
+def _save_own_portfolio_id(portfolio_id: str) -> None:
+    """Schrijft het eigen portfolio-ID naar .env en gebruikt het direct in deze run."""
+    env_path = ENV_FILE
+    key = "PORTFLOW_OWN_PORTFOLIO_ID"
+    previous = None
+    content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    m = re.search(rf"^{key}=(.*)$", content, flags=re.MULTILINE)
+    if m:
+        previous = m.group(1).strip()
+        content = content[: m.start()] + f"{key}={portfolio_id}" + content[m.end():]
+    else:
+        content = (content.rstrip("\n") + "\n" if content else "") + f"{key}={portfolio_id}\n"
+    env_path.write_text(content, encoding="utf-8")
+    globals()["OWN_PORTFOLIO_ID"] = portfolio_id
+    os.environ[key] = portfolio_id
+    if previous and previous != portfolio_id:
+        print(f"  Eigen portfolio-ID gewijzigd van {previous} naar {portfolio_id} in .env")
+    else:
+        print(f"  Eigen portfolio-ID {portfolio_id} opgeslagen in .env")
+
+
+def _check_own_portfolio_id(token: str, portfolio_id: str) -> str | None:
+    """Controleer via de API of portfolio_id het eigen portfolio van de ingelogde gebruiker is.
+    Geeft None terug als het klopt, anders een foutmelding."""
+    if not portfolio_id.isdigit():
+        return "Een portfolio-ID bestaat alleen uit cijfers."
+    try:
+        r = HTTP.get(
+            f"{BASE_URL}/portfolios/{portfolio_id}",
+            headers={"Authorization": f"Bearer {token}", "accept": "*/*"},
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        return f"Controle mislukt ({e.__class__.__name__})."
+    if r.status_code != 200:
+        return f"Portfolio {portfolio_id} niet gevonden of geen toegang (HTTP {r.status_code})."
+    if (r.json() or {}).get("access_type") != "owner":
+        return f"Portfolio {portfolio_id} is niet jouw eigen portfolio."
+    return None
+
+
+def ensure_own_portfolio_id(token: str) -> str:
+    """Zorg dat PORTFLOW_OWN_PORTFOLIO_ID bekend is; vraag erom als het ontbreekt.
+    Geeft de te gebruiken token terug (een nieuwere als die via de browser is opgehaald)."""
+    if (globals().get("OWN_PORTFOLIO_ID") or "").strip():
+        return token
+    print()
+    print("Je eigen portfolio-ID ontbreekt in .env (PORTFLOW_OWN_PORTFOLIO_ID).")
+    print("Eigen portfolio-ID ophalen:")
+    print("  1) Via een browservenster (log zo nodig in bij Canvas; het ID wordt automatisch opgehaald)")
+    print("  2) ID invoeren (te vinden in de URL van je eigen portfolio: https://portfolio.drieam.app/portfolio/<ID>/...)")
+    while True:
+        choice = input("Keuze [1/2] (of voer direct het ID in): ").strip()
+        if not choice:
+            raise SystemExit("Geen portfolio-ID opgegeven, script gestopt.")
+        if choice == "1":
+            new_token = _capture_token_via_browser(BROWSER_TOKEN_TIMEOUT_S)
+            if new_token and new_token != token:
+                _save_token_to_env(new_token)
+                globals()["BEARER_TOKEN"] = new_token
+                token = new_token
+            if (globals().get("OWN_PORTFOLIO_ID") or "").strip():
+                return token
+            print("Geen portfolio-ID via de browser verkregen; kies opnieuw.")
+            continue
+        if choice == "2":
+            portfolio_id = input("Voer je portfolio-ID in: ").strip()
+        elif choice.isdigit() and len(choice) > 2:
+            portfolio_id = choice
+        else:
+            print("Ongeldige keuze.")
+            continue
+        error = _check_own_portfolio_id(token, portfolio_id)
+        if error:
+            print(error)
+            continue
+        _save_own_portfolio_id(portfolio_id)
+        return token
+
+
 def _capture_token_via_browser(timeout_s: int) -> str | None:
     """Open een browservenster op de Portflow-tool in Canvas en onderschep de bearer token.
+    Leest ook het eigen portfolio-ID uit en slaat dat op in .env.
     Geeft de gecontroleerde token terug, of None als dat niet lukt."""
     if not _ensure_playwright():
         return None
@@ -1027,6 +1140,7 @@ def _capture_token_via_browser(timeout_s: int) -> str | None:
             print(f"Waarschuwing bij laden van de pagina: {e}")
 
         token = None
+        portfolio_id = None
         deadline = time.monotonic() + timeout_s
         try:
             while time.monotonic() < deadline:
@@ -1046,13 +1160,27 @@ def _capture_token_via_browser(timeout_s: int) -> str | None:
                 context.pages[0].wait_for_timeout(500)
             else:
                 print(f"Geen geldige token gevonden binnen {timeout_s} seconden.")
+
+            if token:
+                # De startgegevens staan normaal al in de pagina; wacht kort als dat (nog) niet zo is
+                grace_deadline = time.monotonic() + PORTFOLIO_ID_GRACE_S
+                while context.pages:
+                    portfolio_id = _read_own_portfolio_id(context)
+                    if portfolio_id or time.monotonic() > grace_deadline:
+                        break
+                    context.pages[0].wait_for_timeout(500)
+                if not portfolio_id:
+                    print("Eigen portfolio-ID niet gevonden in de Portflow-pagina.")
         except PlaywrightError:
-            print("Browservenster gesloten voordat er een token gevonden is.")
+            if not token:
+                print("Browservenster gesloten voordat er een token gevonden is.")
         finally:
             try:
                 context.close()
             except PlaywrightError:
                 pass
+        if portfolio_id:
+            _save_own_portfolio_id(portfolio_id)
         return token
 
 
@@ -4035,6 +4163,7 @@ try:
     while True:
         semester_scope = choose_semester_scope()
         token = get_bearer_token()
+        token = ensure_own_portfolio_id(token)
         _user = _get_own_user_name(token)
         if _user:
             print(f"Ingelogd als: {_user}")

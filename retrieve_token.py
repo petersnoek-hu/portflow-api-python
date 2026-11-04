@@ -7,6 +7,8 @@ Werking (zelfde aanpak als docs/safari-browser-extension.js):
   3. Luister naar alle uitgaande requests (ook vanuit het Portflow-iframe) en onderschep
      de 'Authorization: Bearer ...' header naar portflow.io / hu.nl / drieam.app.
   4. Controleer de token tegen /api/v1/dashboard en schrijf hem als PORTFLOW_BEARER_TOKEN in .env.
+  5. Lees het eigen portfolio-ID uit de startgegevens van de Portflow-pagina (data-react-props)
+     en schrijf het als PORTFLOW_OWN_PORTFOLIO_ID in .env.
 
 Gebruik:
   python retrieve_token.py [--config pad/naar/.env] [--timeout 300]
@@ -49,6 +51,20 @@ CANVAS_URL = "https://canvas.hu.nl/courses/51659/external_tools/1134"
 API_BASE_URL = "https://portfolio.drieam.app/api/v1"
 TOKEN_HOST_SUFFIXES = ("portflow.io", "hu.nl", "drieam.app")
 ENV_KEY = "PORTFLOW_BEARER_TOKEN"
+PORTFOLIO_ENV_KEY = "PORTFLOW_OWN_PORTFOLIO_ID"
+# Seconden dat na het vinden van de token nog op het portfolio-ID gewacht wordt
+PORTFOLIO_ID_GRACE_S = 10
+# De Portflow-pagina krijgt bij het laden haar startgegevens mee in data-react-props;
+# daarin staat het portfolio van de ingelogde gebruiker (portfolio.id).
+OWN_PORTFOLIO_ID_JS = """() => {
+  for (const el of document.querySelectorAll('div[data-react-class]')) {
+    try {
+      const props = JSON.parse(el.dataset.reactProps || '{}');
+      if (props.portfolio && props.portfolio.id) return String(props.portfolio.id);
+    } catch (e) {}
+  }
+  return null;
+}"""
 
 
 def _get_exe_dir() -> Path:
@@ -133,23 +149,54 @@ def check_token(token: str) -> int:
         return 0
 
 
-def save_token_to_env(token: str, env_path: Path) -> None:
-    """Schrijft de bearer token naar .env (vervangt een eventuele bestaande waarde)."""
+def _save_env_value(key: str, value: str, env_path: Path) -> str | None:
+    """Schrijft key=value naar .env (vervangt een bestaande waarde).
+    Geeft de vorige waarde terug (None als de sleutel nog niet bestond)."""
+    previous = None
     if env_path.exists():
         content = env_path.read_text(encoding="utf-8")
-        if re.search(rf"^{ENV_KEY}=", content, flags=re.MULTILINE):
-            content = re.sub(
-                rf"^{ENV_KEY}=.*$",
-                lambda _m: f"{ENV_KEY}={token}",
-                content,
-                flags=re.MULTILINE,
-            )
+        m = re.search(rf"^{key}=(.*)$", content, flags=re.MULTILINE)
+        if m:
+            previous = m.group(1).strip()
+            content = content[: m.start()] + f"{key}={value}" + content[m.end():]
         else:
-            content = f"{ENV_KEY}={token}\n" + content
+            content = f"{key}={value}\n" + content
     else:
-        content = f"{ENV_KEY}={token}\n"
+        content = f"{key}={value}\n"
     env_path.write_text(content, encoding="utf-8")
+    return previous
+
+
+def save_token_to_env(token: str, env_path: Path) -> None:
+    """Schrijft de bearer token naar .env (vervangt een eventuele bestaande waarde)."""
+    _save_env_value(ENV_KEY, token, env_path)
     print(f"Token opgeslagen in {env_path}")
+
+
+def save_portfolio_id_to_env(portfolio_id: str, env_path: Path) -> None:
+    """Schrijft het eigen portfolio-ID naar .env (vervangt een eventuele bestaande waarde)."""
+    previous = _save_env_value(PORTFOLIO_ENV_KEY, portfolio_id, env_path)
+    if previous and previous != portfolio_id:
+        print(f"Eigen portfolio-ID gewijzigd van {previous} naar {portfolio_id} in {env_path}")
+    else:
+        print(f"Eigen portfolio-ID {portfolio_id} opgeslagen in {env_path}")
+
+
+def read_own_portfolio_id(context) -> str | None:
+    """Zoek in alle Portflow-frames naar het portfolio-ID van de ingelogde gebruiker."""
+    from playwright.sync_api import Error as PlaywrightError
+
+    for page in context.pages:
+        for frame in page.frames:
+            if not (urlparse(frame.url).hostname or "").endswith("drieam.app"):
+                continue
+            try:
+                portfolio_id = frame.evaluate(OWN_PORTFOLIO_ID_JS)
+            except PlaywrightError:
+                continue
+            if portfolio_id and str(portfolio_id).isdigit():
+                return str(portfolio_id)
+    return None
 
 
 def _launch_context(p):
@@ -184,7 +231,8 @@ def _launch_context(p):
     return context
 
 
-def capture_token(timeout_s: int) -> str | None:
+def capture_token(timeout_s: int) -> tuple[str | None, str | None]:
+    """Onderschep de bearer token en lees het eigen portfolio-ID uit; geeft (token, portfolio_id)."""
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
 
@@ -216,6 +264,7 @@ def capture_token(timeout_s: int) -> str | None:
             print(f"Waarschuwing bij laden van de pagina: {e}")
 
         token = None
+        portfolio_id = None
         deadline = time.monotonic() + timeout_s
         try:
             while time.monotonic() < deadline:
@@ -235,14 +284,26 @@ def capture_token(timeout_s: int) -> str | None:
                 context.pages[0].wait_for_timeout(500)
             else:
                 print(f"Geen geldige token gevonden binnen {timeout_s} seconden.")
+
+            if token:
+                # De startgegevens staan normaal al in de pagina; wacht kort als dat (nog) niet zo is
+                grace_deadline = time.monotonic() + PORTFOLIO_ID_GRACE_S
+                while context.pages:
+                    portfolio_id = read_own_portfolio_id(context)
+                    if portfolio_id or time.monotonic() > grace_deadline:
+                        break
+                    context.pages[0].wait_for_timeout(500)
+                if not portfolio_id:
+                    print("Eigen portfolio-ID niet gevonden in de Portflow-pagina.")
         except PlaywrightError:
-            print("Browservenster gesloten voordat er een token gevonden is.")
+            if not token:
+                print("Browservenster gesloten voordat er een token gevonden is.")
         finally:
             try:
                 context.close()
             except PlaywrightError:
                 pass
-        return token
+        return token, portfolio_id
 
 
 def main():
@@ -254,10 +315,12 @@ def main():
     ensure_package("requests", "requests")
     ensure_package("playwright", "playwright")
 
-    token = capture_token(args.timeout)
+    token, portfolio_id = capture_token(args.timeout)
     if not token:
         sys.exit(1)
     save_token_to_env(token, env_path)
+    if portfolio_id:
+        save_portfolio_id_to_env(portfolio_id, env_path)
 
 
 if __name__ == "__main__":

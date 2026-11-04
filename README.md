@@ -47,7 +47,7 @@ Alle scripts lezen hun instellingen uit een `.env`-bestand in dezelfde map als h
 | `PORTFLOW_BEARER_TOKEN` | alle scripts | JWT bearer token voor de Portflow API. Zie [Bearer token](#bearer-token). Ontbreekt het of is het verlopen, dan vraagt `portflow.py` om een nieuw token en slaat het zelf op. |
 | `PORTFLOW_SEMESTER_START` | alle scripts | Eerste dag van het semester, `YYYY-MM-DD`. Evaluaties buiten het semester worden niet getoond. `portflow.py` vraagt erom als het ontbreekt en slaat het antwoord op; de andere scripts gebruiken dan `2026-02-12`. |
 | `PORTFLOW_SEMESTER_END` | alle scripts | Laatste dag van het semester, `YYYY-MM-DD`. Zelfde gedrag; standaard in de andere scripts is `2026-06-30`. |
-| `PORTFLOW_OWN_PORTFOLIO_ID` | `portflow.py`, `evaluaties.py` | ID van je eigen portfolio. Je vindt het in de URL als je je eigen portfolio opent, bijv. `https://portfolio.drieam.app/portfolio/23588/...`. Nodig voor de lijst met evaluaties die je moet beoordelen, voor de naam van de beoordelaar bij openstaande evaluaties en voor beheeroptie 6 en 7. `evaluaties.py` vraagt erom als het ontbreekt. |
+| `PORTFLOW_OWN_PORTFOLIO_ID` | `portflow.py`, `evaluaties.py` | ID van je eigen portfolio. Wordt automatisch opgeslagen als je het token via een browservenster ophaalt (`portflow.py` keuze 1 of `retrieve_token.py`). Ontbreekt het, dan vraagt `portflow.py` erom (via een browservenster of invoeren; een ingevoerd ID wordt gecontroleerd). Handmatig: je vindt het in de URL als je je eigen portfolio opent, bijv. `https://portfolio.drieam.app/portfolio/23588/...`. Nodig voor de lijst met evaluaties die je moet beoordelen, voor de naam van de beoordelaar bij openstaande evaluaties en voor beheeroptie 6 en 7. `evaluaties.py` vraagt erom als het ontbreekt. |
 | `PORTFLOW_COACH_STUDENTS_JSON` | `portflow.py`, export-scripts | Je coachstudenten. Zie [Studentenlijsten](#studentenlijsten). |
 | `PORTFLOW_TRIBE_STUDENTS_JSON` | `portflow.py` | Alle studenten in je tribe. Zelfde formaat. |
 | `PORTFLOW_GILDE_STUDENTS_JSON` | `portflow.py` | Alle studenten in je gilde. Zelfde formaat. |
@@ -210,7 +210,9 @@ Is het token in `.env` leeg of verlopen, dan vraagt `portflow.py` hoe je een nie
 1. **Via een browservenster**: opent Chrome en haalt het token automatisch op, net als `retrieve_token.py` hieronder.
 2. **Token plakken**: haal het token zelf op (zie [Handmatig](#handmatig)) en plak het. Je kunt het token ook direct bij de keuzevraag plakken.
 
-Het nieuwe token wordt altijd automatisch opgeslagen als `PORTFLOW_BEARER_TOKEN` in `.env`.
+Het nieuwe token wordt altijd automatisch opgeslagen als `PORTFLOW_BEARER_TOKEN` in `.env`. Bij keuze 1 wordt ook je eigen portfolio-ID opgeslagen als `PORTFLOW_OWN_PORTFOLIO_ID`.
+
+Ontbreekt daarna nog het portfolio-ID (bij keuze 2, of als het token in `.env` nog geldig was), dan vraagt `portflow.py` erom met dezelfde twee keuzes: via een browservenster, of het ID zelf invoeren (uit de URL van je eigen portfolio). Een ingevoerd ID wordt via de API gecontroleerd: het moet jouw eigen portfolio zijn. Na het opstarten staan dus altijd zowel het token als het portfolio-ID in `.env`.
 
 ### `retrieve_token.py`
 
@@ -218,7 +220,7 @@ Het nieuwe token wordt altijd automatisch opgeslagen als `PORTFLOW_BEARER_TOKEN`
 python3 retrieve_token.py [--config pad/naar/.env] [--timeout 300]
 ```
 
-Het script opent een Chrome-venster met de Portflow-pagina in Canvas. Log zo nodig in. Zodra de pagina een API-request met een `Authorization: Bearer ...`-header doet, wordt het token gecontroleerd tegen `/api/v1/dashboard` en opgeslagen als `PORTFLOW_BEARER_TOKEN` in `.env`. Het venster sluit daarna vanzelf.
+Het script opent een Chrome-venster met de Portflow-pagina in Canvas. Log zo nodig in. Zodra de pagina een API-request met een `Authorization: Bearer ...`-header doet, wordt het token gecontroleerd tegen `/api/v1/dashboard` en opgeslagen als `PORTFLOW_BEARER_TOKEN` in `.env`. Het script leest ook het ID van het portfolio van de ingelogde gebruiker uit de Portflow-pagina en slaat het op als `PORTFLOW_OWN_PORTFOLIO_ID`; een bestaande waarde wordt overschreven. Het venster sluit daarna vanzelf.
 
 - Het browserprofiel staat in `.browser-profile/` (in `.gitignore`), zodat je meestal niet opnieuw hoeft in te loggen.
 - `--timeout`: maximaal aantal seconden wachten op een token (standaard 300).
